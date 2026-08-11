@@ -2,9 +2,9 @@ import json
 import random
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from bot.models import Battle, BattleRound
-from bot.services.gigachat import generate_question, GigaChatError
+from sqlalchemy import select, update
+from bot.models import Battle, BattleRound, User
+from bot.services.word_levels import WORDS_BY_LEVEL, get_level_by_elo
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +17,7 @@ async def create_battle(session: AsyncSession, player1_id: int, difficulty: str 
         current_round=0,
         player1_score=0,
         player2_score=0,
-        difficulty=difficulty
+        difficulty=difficulty  # теперь это уровень (A1, A2, ...)
     )
     session.add(battle)
     await session.commit()
@@ -36,42 +36,35 @@ async def join_battle(session: AsyncSession, battle: Battle, player2_id: int) ->
     await session.refresh(battle)
     return battle
 
-async def generate_round_question(difficulty: str = "medium", used_words: list = None) -> dict:
-    if used_words is None:
-        used_words = []
-    q_type = random.choice(["word_to_translate", "translate_to_word"])
-    question = await generate_question(difficulty, q_type, used_words)
-    question["question_type"] = q_type
-    return question
+async def get_word_for_level(level: str, used_words: list) -> tuple:
+    """Возвращает случайное слово (англ, рус) из словаря уровня, исключая used_words."""
+    words = WORDS_BY_LEVEL.get(level, WORDS_BY_LEVEL["A1"])
+    available = [w for w in words if w[0] not in used_words]
+    if not available:
+        available = words  # если все использованы, повторяем
+    return random.choice(available)
 
-async def create_rounds_for_battle(session: AsyncSession, battle_id: int, difficulty: str = "medium", rounds_count: int = 10):
-    logger.info(f"Создаём {rounds_count} раундов для битвы {battle_id} со сложностью {difficulty}")
+async def create_rounds_for_battle(session: AsyncSession, battle_id: int, level: str, rounds_count: int = 10):
+    logger.info(f"Создаём {rounds_count} раундов для битвы {battle_id} уровня {level}")
     battle = await session.get(Battle, battle_id)
     if not battle:
         logger.error(f"Битва {battle_id} не найдена")
         return
 
-    used_words = []
-
+    used_words = []  # чтобы не повторялись в рамках одной битвы
     for i in range(1, rounds_count + 1):
-        try:
-            question = await generate_round_question(difficulty, used_words)
-        except GigaChatError as e:
-            logger.error(f"Ошибка генерации вопроса для раунда {i}: {e}")
-            await session.rollback()
-            raise GigaChatError(f"Не удалось сгенерировать вопросы для битвы: {e}") from e
-
-        used_words.append(question["word"])
-
+        word_en, word_ru = await get_word_for_level(level, used_words)
+        used_words.append(word_en)
+        # Для режима без вариантов нам нужны только слово и перевод
         round_obj = BattleRound(
             battle_id=battle_id,
             round_number=i,
-            question_type=question["question_type"],
-            word=question["word"],
-            correct_answer=question["correct_answer"],
-            options=json.dumps(question["options"])
+            question_type="text_input",  # новый тип
+            word=word_en,
+            correct_answer=word_ru,
+            options=""  # не используется
         )
         session.add(round_obj)
-        logger.info(f"Добавлен раунд {i} (тип: {question['question_type']})")
+        logger.info(f"Добавлен раунд {i}: {word_en} -> {word_ru}")
     await session.commit()
     logger.info(f"Раунды для битвы {battle_id} сохранены")
