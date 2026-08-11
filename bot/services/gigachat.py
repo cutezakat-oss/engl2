@@ -232,7 +232,7 @@ def validate_question(question: dict, q_type: str) -> bool:
         return False
 
     if q_type == "word_to_translate":
-        # word должно быть английским, а все варианты (correct и options) – русскими
+        # слово английское, все варианты русские
         if not is_latin(word):
             return False
         if not is_cyrillic(correct):
@@ -240,8 +240,8 @@ def validate_question(question: dict, q_type: str) -> bool:
         for opt in options:
             if not is_cyrillic(opt):
                 return False
-    else:  # translate_to_word
-        # word должно быть русским, а все варианты – английскими
+    else:
+        # слово русское, все варианты английские
         if not is_cyrillic(word):
             return False
         if not is_latin(correct):
@@ -287,22 +287,24 @@ class GigaChatError(Exception):
 async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate", used_words: list = None) -> dict:
     if used_words is None:
         used_words = []
-    
-    # Формируем строгий промпт
+
+    forbidden = ["easy", "medium", "hard", "elementary", "intermediate", "advanced", "beginner", "proficient"] + used_words
+    forbidden_str = ", ".join(forbidden)
+
     if question_type == "word_to_translate":
         prompt = (
             "Придумай случайное английское слово (существительное, прилагательное или глагол), которое не связано с уровнями сложности.\n"
-            f"Запрещённые слова: {', '.join(['easy', 'medium', 'hard', 'elementary', 'intermediate', 'advanced', 'beginner', 'proficient'] + used_words)}.\n"
+            f"Запрещённые слова: {forbidden_str}.\n"
             "Дай его перевод на русский язык и 3 неверных перевода на русский язык. Варианты должны быть правдоподобными, но не синонимами правильного ответа.\n"
             "ВНИМАНИЕ: все варианты ответа (правильный и ложные) должны быть на РУССКОМ языке! Не используй английские слова в вариантах!\n"
             "Ответ должен быть только в формате JSON:\n"
             '{"word": "английское слово", "correct": "правильный перевод на русском", "wrong": ["ложный перевод1 на русском", "ложный перевод2 на русском", "ложный перевод3 на русском"]}\n'
             "Не добавляй пояснений, комментариев или дополнительного текста."
         )
-    else:  # translate_to_word
+    else:
         prompt = (
             "Придумай случайное русское слово (существительное, прилагательное или глагол), соответствующее английскому слову, которое не связано с уровнями сложности.\n"
-            f"Запрещённые слова: {', '.join(['easy', 'medium', 'hard', 'elementary', 'intermediate', 'advanced', 'beginner', 'proficient'] + used_words)}.\n"
+            f"Запрещённые слова: {forbidden_str}.\n"
             "Дай правильный английский перевод и 3 неверных английских перевода. Варианты должны быть правдоподобными, но не синонимами правильного ответа.\n"
             "ВНИМАНИЕ: все варианты ответа (правильный и ложные) должны быть на АНГЛИЙСКОМ языке! Не используй русские слова в вариантах!\n"
             "Ответ должен быть только в формате JSON:\n"
