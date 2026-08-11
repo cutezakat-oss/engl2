@@ -1,7 +1,6 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с основными разделами (всегда внизу)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -12,7 +11,10 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="⚔️ Соревнования"),
                 KeyboardButton(text="📊 Мой прогресс"),
             ],
+            [
+                KeyboardButton(text="❌ Отменить поиск"),   # Новая кнопка
+            ]
         ],
-        resize_keyboard=True,   # чтобы кнопки были компактными
-        one_time_keyboard=False # чтобы оставалась всегда
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
