@@ -19,9 +19,9 @@ GIGACHAT_API_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions
 
 # ---------- Промпты для слов дня ----------
 DIFFICULTY_PROMPTS = {
-    "easy": "Дай простое английское слово уровня A1-A2, его транскрипцию (произношение), перевод на русский и пример использования. Ответ строго в формате: слово|транскрипция|перевод|пример",
-    "medium": "Дай английское слово уровня B1-B2, его транскрипцию, перевод и пример. Ответ в формате: слово|транскрипция|перевод|пример",
-    "hard": "Дай сложное английское слово уровня C1-C2, его транскрипцию, перевод и пример. Ответ в формате: слово|транскрипция|перевод|пример",
+    "easy": "Дай простое английское слово уровня A1-A2, его транскрипцию (произношение), перевод на русский и пример использования. Ответ строго в формате: слово|транскрипция|перевод|пример. Не используй Markdown, не добавляй пояснений, ответ должен содержать только одну строку.",
+    "medium": "Дай английское слово уровня B1-B2, его транскрипцию, перевод и пример. Ответ строго в формате: слово|транскрипция|перевод|пример. Не используй Markdown, не добавляй пояснений, ответ должен содержать только одну строку.",
+    "hard": "Дай сложное английское слово уровня C1-C2, его транскрипцию, перевод и пример. Ответ строго в формате: слово|транскрипция|перевод|пример. Не используй Markdown, не добавляй пояснений, ответ должен содержать только одну строку.",
 }
 
 # ---------- SSL ----------
@@ -60,7 +60,80 @@ async def get_access_token() -> str:
                 raise Exception("No access_token in response")
             return token
 
-# ---------- Функция для слов дня ----------
+# ---------- Функция для парсинга ответа слов дня ----------
+def parse_word_response(raw: str):
+    """
+    Извлекает слово, транскрипцию, перевод и пример из сырого ответа GigaChat.
+    Поддерживает различные форматы.
+    Возвращает кортеж (word, transcription, translation, example) или None.
+    """
+    # Удаляем лишние пробелы и переносы строк
+    raw = raw.replace('\n', ' ').replace('\r', '').strip()
+
+    # 1. Пробуем распарсить формат с жирным выделением **слово|транскрипция|перевод|пример**
+    bold_match = re.search(r'\*\*(.+?)\*\*', raw)
+    if bold_match:
+        content = bold_match.group(1).strip()
+        parts = content.split('|')
+        if len(parts) >= 4:
+            word = parts[0].strip()
+            transcription = parts[1].strip()
+            translation = parts[2].strip()
+            example = parts[3].strip()
+            # Убираем возможные пояснения после примера
+            example = re.sub(r'\s*\([^)]*\)\s*$', '', example).strip()
+            if word and translation:
+                return (word, transcription, translation, example)
+
+    # 2. Пробуем формат с маркированным списком: - **слово**|[транскрипция]|перевод|пример
+    list_match = re.search(r'-\s+\*\*(.+?)\*\*\s*\|?\s*\[?([^\]]*)\]?\s*\|?\s*(.+?)(?=\s*-\s|\s*$)', raw, re.DOTALL)
+    if list_match:
+        word = list_match.group(1).strip()
+        transcription = list_match.group(2).strip()
+        rest = list_match.group(3).strip()
+        if '|' in rest:
+            parts = rest.split('|')
+            translation = parts[0].strip()
+            example = parts[1].strip() if len(parts) > 1 else ''
+        else:
+            ru_match = re.search(r'([А-Яа-яЁё\s,;:!?]+)', rest)
+            en_match = re.search(r'([A-Za-z\s,;:!?\']+)', rest)
+            translation = ru_match.group(1).strip() if ru_match else ''
+            example = en_match.group(1).strip() if en_match else ''
+            if translation and example and example in translation:
+                after_trans = rest.split(translation)[-1].strip()
+                en_match2 = re.search(r'([A-Za-z\s,;:!?\']+)', after_trans)
+                example = en_match2.group(1).strip() if en_match2 else ''
+        if word and translation:
+            return (word, transcription, translation, example)
+
+    # 3. Пробуем разделить по | (простой формат)
+    parts = raw.split('|')
+    if len(parts) >= 4:
+        word = parts[0].strip()
+        transcription = parts[1].strip()
+        translation = parts[2].strip()
+        example = parts[3].strip()
+        if word and translation:
+            return (word, transcription, translation, example)
+
+    # 4. Извлечение через регулярные выражения (запасной вариант)
+    word_match = re.search(r'\b([A-Za-z\']+)\b', raw)
+    trans_match = re.search(r'[\[\(]([^\]]+)[\]\)]', raw)
+    trans_ru_match = re.search(r'[А-Яа-яЁё][А-Яа-яЁё\s,;:!?]{2,}', raw)
+    example_match = re.search(r'([A-Z][A-Za-z\s,;:!?\']{5,})', raw)
+
+    word = word_match.group(1) if word_match else ''
+    transcription = trans_match.group(1) if trans_match else ''
+    translation = trans_ru_match.group(0) if trans_ru_match else ''
+    example = example_match.group(1) if example_match else ''
+
+    if word and translation:
+        return (word, transcription, translation, example)
+
+    return None
+
+# ---------- Функция для слов дня (с улучшенным парсингом) ----------
 async def generate_word(difficulty: str = "medium", exclude: list = None) -> dict:
     if exclude is None:
         exclude = []
@@ -89,7 +162,7 @@ async def generate_word(difficulty: str = "medium", exclude: list = None) -> dic
     payload = {
         "model": "GigaChat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.8,
+        "temperature": 0.7,
         "max_tokens": 200,
     }
 
@@ -106,12 +179,10 @@ async def generate_word(difficulty: str = "medium", exclude: list = None) -> dic
                         if "choices" in data and len(data["choices"]) > 0:
                             raw = data["choices"][0]["message"]["content"].strip()
                             logger.info(f"Сырой ответ: {raw}")
-                            parts = raw.split("|")
-                            if len(parts) >= 4:
-                                word = parts[0].strip()
-                                transcription = parts[1].strip()
-                                translation = parts[2].strip()
-                                example = parts[3].strip()
+
+                            parsed = parse_word_response(raw)
+                            if parsed:
+                                word, transcription, translation, example = parsed
                                 if word in exclude:
                                     logger.warning(f"Слово '{word}' уже выучено, пробуем снова...")
                                     continue
@@ -122,7 +193,9 @@ async def generate_word(difficulty: str = "medium", exclude: list = None) -> dic
                                     "example": example
                                 }
                             else:
-                                logger.warning(f"Неверный формат ответа: {raw}")
+                                logger.warning(f"Не удалось распарсить ответ: {raw}")
+                                if attempt == 4:
+                                    break
                                 continue
                     elif status == 401:
                         logger.warning("Токен протух, обновляем...")
@@ -187,24 +260,14 @@ def validate_question(question: dict, q_type: str) -> bool:
                 return False
     return True
 
-# ---------- Функция для извлечения JSON из текста ----------
+# ---------- Функция для извлечения JSON из текста (для PvP) ----------
 def extract_and_parse_json(text: str):
-    """
-    Пытается извлечь JSON-объект из текста, исправляя кавычки и удаляя комментарии.
-    Возвращает распарсенный словарь или None.
-    """
-    # Заменяем все возможные варианты кавычек на стандартные двойные кавычки
     text = text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
-    # Удаляем многострочные комментарии /* ... */
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    # Удаляем однострочные комментарии // ... до конца строки
     text = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
-    # Удаляем пояснения в скобках и после них
     text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)
-    # Ищем что-то похожее на JSON-объект { ... }
     match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
     if not match:
-        # Если не нашли простой объект, пробуем найти с вложенными структурами
         stack = []
         start = -1
         for i, ch in enumerate(text):
@@ -231,9 +294,8 @@ def extract_and_parse_json(text: str):
 class GigaChatError(Exception):
     pass
 
-# ---------- НОВАЯ ФУНКЦИЯ ДЛЯ PVP С ПЕРЕРАБОТАННЫМИ ПРОМПТАМИ ----------
+# ---------- Функция для генерации PvP вопросов ----------
 async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate") -> dict:
-    # Определяем текстовое описание уровня
     level_desc = {
         "easy": "начального уровня (A1-A2)",
         "medium": "среднего уровня (B1-B2)",
@@ -248,7 +310,7 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
             "Ответ строго в формате JSON: "
             '{"word": "английское слово", "correct": "правильный перевод", "wrong": ["ложный1", "ложный2", "ложный3"]}'
         )
-    else:  # translate_to_word
+    else:
         prompt = (
             f"Придумай случайное русское слово, соответствующее английскому слову {level_desc}. "
             "Дай правильный английский перевод и 3 неверных английских перевода. "
@@ -273,7 +335,7 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
     payload = {
         "model": "GigaChat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,  # уменьшил для стабильности
+        "temperature": 0.5,
         "max_tokens": 250,
     }
 
