@@ -39,6 +39,7 @@ class LearnedWord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     word: Mapped[str] = mapped_column(String(100), nullable=False)
+    translation: Mapped[str] = mapped_column(String(100), nullable=True)  # ДОБАВЛЕНО
     learned_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="learned_words")
@@ -56,7 +57,7 @@ class Battle(Base):
     current_round: Mapped[int] = mapped_column(Integer, default=0)
     player1_score: Mapped[int] = mapped_column(Integer, default=0)
     player2_score: Mapped[int] = mapped_column(Integer, default=0)
-    difficulty: Mapped[str] = mapped_column(String(20), default="medium")  # <-- ДОБАВЛЕНО
+    difficulty: Mapped[str] = mapped_column(String(20), default="medium")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
