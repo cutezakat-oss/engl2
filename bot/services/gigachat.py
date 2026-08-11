@@ -221,35 +221,7 @@ def is_cyrillic(text: str) -> bool:
 def is_latin(text: str) -> bool:
     return bool(re.search(r'[a-zA-Z]', text))
 
-def validate_question(question: dict, q_type: str) -> bool:
-    word = question.get("word", "")
-    correct = question.get("correct_answer", "")
-    options = question.get("options", [])
-
-    if len(set(options)) != len(options):
-        return False
-    if correct in options and options.count(correct) > 1:
-        return False
-
-    if q_type == "word_to_translate":
-        if not is_latin(word):
-            return False
-        if not is_cyrillic(correct):
-            return False
-        for opt in options:
-            if not is_cyrillic(opt):
-                return False
-    else:
-        if not is_cyrillic(word):
-            return False
-        if not is_latin(correct):
-            return False
-        for opt in options:
-            if not is_latin(opt):
-                return False
-    return True
-
-def extract_and_parse_json(text: str):
+def extract_json(text: str):
     text = text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
     text = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
@@ -279,10 +251,37 @@ def extract_and_parse_json(text: str):
                             pass
     return None
 
+def extract_json_array(text: str):
+    text = text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*\([^()]*\)\s*', ' ', text)
+    text = re.sub(r'^\s*[\-\*\d]+\.?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Ищем массив [ ... ]
+    stack = []
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '[':
+            if not stack:
+                start = i
+            stack.append(ch)
+        elif ch == ']':
+            if stack:
+                stack.pop()
+                if not stack and start != -1:
+                    candidate = text[start:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        pass
+    return None
+
 class GigaChatError(Exception):
     pass
 
-# ---------- НОВАЯ ФУНКЦИЯ ДЛЯ PVP ----------
+# ---------- Генерация вопроса для PvP (два запроса) ----------
 async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate", used_words: list = None) -> dict:
     if used_words is None:
         used_words = []
@@ -290,46 +289,50 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
     forbidden = ["easy", "medium", "hard", "elementary", "intermediate", "advanced", "beginner", "proficient"] + used_words
     forbidden_str = ", ".join(forbidden)
 
-    if question_type == "word_to_translate":
-        prompt = (
-            "Придумай случайное английское слово (существительное, прилагательное или глагол), которое не входит в список запрещённых слов.\n"
-            f"Запрещённые слова: {forbidden_str}.\n"
-            "Дай его перевод на русский язык и 3 неверных перевода на русский язык. Все варианты должны быть на русском языке.\n"
-            "Верни только JSON-объект с полями: word (английское слово), correct (правильный перевод), wrong (массив из трёх ложных переводов).\n"
-            "Не добавляй пояснений или комментариев."
-        )
-    else:
-        prompt = (
-            "Придумай случайное русское слово (существительное, прилагательное или глагол), соответствующее английскому слову, которое не входит в список запрещённых слов.\n"
-            f"Запрещённые слова: {forbidden_str}.\n"
-            "Дай правильный английский перевод и 3 неверных английских перевода. Все варианты должны быть на английском языке.\n"
-            "Верни только JSON-объект с полями: word (русское слово), correct (правильный перевод на английском), wrong (массив из трёх ложных переводов на английском).\n"
-            "Не добавляй пояснений или комментариев."
-        )
+    # Первый запрос: получить слово и правильный перевод
+    for attempt in range(20):
+        try:
+            token = await get_access_token()
+        except Exception as e:
+            logger.error(f"Ошибка получения токена: {e}")
+            raise GigaChatError("Не удалось авторизоваться в GigaChat") from e
 
-    logger.info(f"Запрос к GigaChat для PvP: {prompt[:200]}...")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
-    try:
-        token = await get_access_token()
-    except Exception as e:
-        logger.error(f"Ошибка получения токена: {e}")
-        raise GigaChatError("Не удалось авторизоваться в GigaChat") from e
+        if question_type == "word_to_translate":
+            prompt = (
+                "Ты — генератор слов для викторины по английскому языку.\n"
+                "Придумай случайное английское слово (существительное, прилагательное или глагол).\n"
+                f"Запрещённые слова: {forbidden_str} (их нельзя использовать).\n"
+                "Дай его перевод на русский язык.\n"
+                "Верни только JSON-объект с полями: word (английское слово), correct (перевод на русский).\n"
+                "Пример: {\"word\": \"cat\", \"correct\": \"кошка\"}\n"
+                "Не добавляй пояснений или комментариев, только JSON."
+            )
+        else:
+            prompt = (
+                "Ты — генератор слов для викторины по английскому языку.\n"
+                "Придумай случайное русское слово (существительное, прилагательное или глагол).\n"
+                f"Запрещённые слова: {forbidden_str} (их нельзя использовать).\n"
+                "Дай его правильный перевод на английский язык.\n"
+                "Верни только JSON-объект с полями: word (русское слово), correct (перевод на английский).\n"
+                "Пример: {\"word\": \"кошка\", \"correct\": \"cat\"}\n"
+                "Не добавляй пояснений или комментариев, только JSON."
+            )
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    payload = {
-        "model": "GigaChat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,  # повышаем для вариативности
-        "max_tokens": 350,
-    }
+        payload = {
+            "model": "GigaChat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 200,
+        }
 
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        for attempt in range(15):
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
             try:
                 async with session.post(GIGACHAT_API_URL, json=payload, headers=headers, timeout=30) as resp:
                     status = resp.status
@@ -338,46 +341,96 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
                         data = await resp.json()
                         if "choices" in data and len(data["choices"]) > 0:
                             raw = data["choices"][0]["message"]["content"].strip()
-                            logger.info(f"Сырой ответ GigaChat: {raw}")
+                            logger.info(f"Сырой ответ GigaChat (первый запрос): {raw}")
 
-                            parsed = extract_and_parse_json(raw)
+                            parsed = extract_json(raw)
                             if parsed is None:
                                 logger.warning("Не удалось извлечь JSON, пробуем снова...")
                                 continue
 
                             word = parsed.get("word", "").strip()
                             correct = parsed.get("correct", "").strip()
-                            wrong = parsed.get("wrong", [])
-                            if isinstance(wrong, list) and len(wrong) >= 3:
-                                wrong = wrong[:3]
-                            else:
-                                logger.warning(f"Неверный формат wrong: {wrong}")
+
+                            if not word or not correct:
+                                logger.warning("Пустые поля, пробуем снова...")
                                 continue
 
-                            # Проверка: слово не должно быть в запрещённом списке (регистронезависимо)
                             if word.lower() in [w.lower() for w in forbidden]:
                                 logger.warning(f"Слово '{word}' в запрещённом списке, пробуем снова...")
                                 continue
 
-                            # Проверка длины слова (минимум 3 символа)
-                            if len(word) < 3:
-                                logger.warning(f"Слово '{word}' слишком короткое, пробуем снова...")
+                            if len(word) < 3 or len(correct) < 2:
+                                logger.warning("Слишком короткое слово или перевод, пробуем снова...")
                                 continue
 
-                            options = [correct] + wrong
-                            random.shuffle(options)
+                            if question_type == "word_to_translate" and not is_latin(word):
+                                logger.warning(f"Слово '{word}' не английское, пробуем снова...")
+                                continue
+                            if question_type == "translate_to_word" and not is_cyrillic(word):
+                                logger.warning(f"Слово '{word}' не русское, пробуем снова...")
+                                continue
 
-                            question_data = {
-                                "word": word,
-                                "correct_answer": correct,
-                                "options": options
+                            # ---- Второй запрос: получить три ложных варианта ----
+                            if question_type == "word_to_translate":
+                                wrong_prompt = (
+                                    f"Придумай 3 ложных перевода на русский язык для английского слова '{word}'.\n"
+                                    f"Правильный перевод: '{correct}'.\n"
+                                    "Ложные переводы должны быть правдоподобными, но не синонимами правильного перевода.\n"
+                                    "Верни только массив из трёх слов на русском языке в формате JSON: [\"ложный1\", \"ложный2\", \"ложный3\"]\n"
+                                    "Не добавляй пояснений или комментариев."
+                                )
+                            else:
+                                wrong_prompt = (
+                                    f"Придумай 3 ложных перевода на английский язык для русского слова '{word}'.\n"
+                                    f"Правильный перевод: '{correct}'.\n"
+                                    "Ложные переводы должны быть правдоподобными, но не синонимами правильного перевода.\n"
+                                    "Верни только массив из трёх слов на английском языке в формате JSON: [\"ложный1\", \"ложный2\", \"ложный3\"]\n"
+                                    "Не добавляй пояснений или комментариев."
+                                )
+
+                            payload_wrong = {
+                                "model": "GigaChat",
+                                "messages": [{"role": "user", "content": wrong_prompt}],
+                                "temperature": 0.8,
+                                "max_tokens": 150,
                             }
 
-                            if validate_question(question_data, question_type):
-                                return question_data
-                            else:
-                                logger.warning("Вопрос не прошёл валидацию (проверка языка), пробуем снова...")
-                                continue
+                            try:
+                                async with session.post(GIGACHAT_API_URL, json=payload_wrong, headers=headers, timeout=30) as resp2:
+                                    if resp2.status == 200:
+                                        data2 = await resp2.json()
+                                        if "choices" in data2 and len(data2["choices"]) > 0:
+                                            raw2 = data2["choices"][0]["message"]["content"].strip()
+                                            logger.info(f"Сырой ответ GigaChat (второй запрос): {raw2}")
+                                            wrong_array = extract_json_array(raw2)
+                                            if wrong_array is not None and isinstance(wrong_array, list) and len(wrong_array) == 3:
+                                                wrong = [str(x).strip() for x in wrong_array]
+                                                # Проверяем, что все варианты на нужном языке
+                                                if question_type == "word_to_translate":
+                                                    if all(is_cyrillic(x) for x in wrong):
+                                                        options = [correct] + wrong
+                                                        random.shuffle(options)
+                                                        return {
+                                                            "word": word,
+                                                            "correct_answer": correct,
+                                                            "options": options
+                                                        }
+                                                else:
+                                                    if all(is_latin(x) for x in wrong):
+                                                        options = [correct] + wrong
+                                                        random.shuffle(options)
+                                                        return {
+                                                            "word": word,
+                                                            "correct_answer": correct,
+                                                            "options": options
+                                                        }
+                                                logger.warning("Не все ложные варианты на нужном языке, пробуем снова...")
+                                            else:
+                                                logger.warning("Не удалось извлечь массив, пробуем снова...")
+                                    else:
+                                        logger.error(f"Ошибка второго запроса: {resp2.status} - {await resp2.text()}")
+                            except Exception as e:
+                                logger.error(f"Ошибка второго запроса: {e}")
                     else:
                         logger.error(f"Ошибка GigaChat: {status} - {text}")
                         await asyncio.sleep(1)
@@ -385,4 +438,4 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
                 logger.error(f"Ошибка при запросе: {e}")
                 await asyncio.sleep(1)
 
-    raise GigaChatError("Не удалось сгенерировать вопрос после 15 попыток")
+    raise GigaChatError("Не удалось сгенерировать вопрос после 20 попыток")
