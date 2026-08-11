@@ -41,7 +41,6 @@ def get_question_keyboard(options: list, round_id: int) -> InlineKeyboardMarkup:
     return keyboard
 
 async def get_queue_count(session) -> int:
-    """Возвращает количество игроков в очереди на PvP."""
     count = await session.scalar(
         select(func.count()).select_from(Battle).where(Battle.status == "waiting")
     )
@@ -213,6 +212,7 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
         await state.update_data(round_start_time=asyncio.get_event_loop().time())
         await state.update_data(current_round_id=round_obj.id)
 
+        # Запускаем таймаут
         asyncio.create_task(timeout_round(message_or_callback, state, battle_id, round_obj.id, session))
     except Exception as e:
         logger.error(f"Ошибка в start_round: {e}", exc_info=True)
@@ -220,44 +220,47 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
 
 async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, round_id: int, session):
     await asyncio.sleep(10)
-    logger.info(f"Таймаут для раунда {round_id} битвы {battle_id}")
+    logger.info(f"Таймаут для раунда {round_id} битвы {battle_id} истёк.")
     if isinstance(message_or_callback, types.Message):
         bot = message_or_callback.bot
     else:
         bot = message_or_callback.bot
 
     try:
+        # Проверяем, не завершился ли уже раунд ответами
         round_obj = await session.get(BattleRound, round_id)
         if not round_obj:
             return
         if round_obj.player1_answer is not None and round_obj.player2_answer is not None:
+            logger.info("Оба игрока уже ответили, таймаут игнорируется.")
             return
+
         battle = await session.get(Battle, battle_id)
         if not battle or battle.status != "active":
             return
 
+        # Если кто-то не ответил, засчитываем очки тому, кто ответил (или никому)
         if round_obj.player1_answer is None and round_obj.player2_answer is not None:
             battle.player2_score += 1
+            # Уведомляем о таймауте первого игрока
+            await bot.send_message(battle.player1_id, "⏰ Время вышло! Вы не ответили на вопрос.")
         elif round_obj.player2_answer is None and round_obj.player1_answer is not None:
             battle.player1_score += 1
+            await bot.send_message(battle.player2_id, "⏰ Время вышло! Вы не ответили на вопрос.")
         else:
-            pass
+            # Оба не ответили
+            await bot.send_message(battle.player1_id, "⏰ Время вышло! Никто не ответил на вопрос.")
+            await bot.send_message(battle.player2_id, "⏰ Время вышло! Никто не ответил на вопрос.")
 
         battle.current_round += 1
         await session.commit()
 
-        for player_id in [battle.player1_id, battle.player2_id]:
-            player = await session.get(User, player_id)
-            if player:
-                try:
-                    await bot.send_message(
-                        player.telegram_id,
-                        "⏰ Время вышло! Переходим к следующему вопросу."
-                    )
-                except Exception as e:
-                    logger.error(f"Не удалось отправить сообщение о таймауте игроку {player.telegram_id}: {e}")
-
-        await start_round(message_or_callback, state, battle_id, session)
+        # Проверяем, не закончилась ли битва
+        if battle.current_round >= battle.rounds_total:
+            await finish_battle(message_or_callback, state, battle, session)
+        else:
+            # Запускаем следующий раунд
+            await start_round(message_or_callback, state, battle_id, session)
     except Exception as e:
         logger.error(f"Ошибка в timeout_round: {e}", exc_info=True)
 
