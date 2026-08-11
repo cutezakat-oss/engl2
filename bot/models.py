@@ -13,6 +13,13 @@ class User(Base):
     first_name: Mapped[str] = mapped_column(String(255), nullable=True)
     created_at = mapped_column(DateTime, server_default=func.now())
 
+    # Новые поля для ELO
+    elo: Mapped[int] = mapped_column(Integer, default=300)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    games_played: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Связи с другими таблицами
     settings: Mapped["UserSettings"] = relationship(back_populates="user", uselist=False)
     learned_words: Mapped[list["LearnedWord"]] = relationship(back_populates="user")
 
@@ -39,7 +46,7 @@ class LearnedWord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     word: Mapped[str] = mapped_column(String(100), nullable=False)
-    translation: Mapped[str] = mapped_column(String(100), nullable=True)  # ДОБАВЛЕНО
+    translation: Mapped[str] = mapped_column(String(100), nullable=True)
     learned_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="learned_words")
@@ -57,7 +64,7 @@ class Battle(Base):
     current_round: Mapped[int] = mapped_column(Integer, default=0)
     player1_score: Mapped[int] = mapped_column(Integer, default=0)
     player2_score: Mapped[int] = mapped_column(Integer, default=0)
-    difficulty: Mapped[str] = mapped_column(String(20), default="medium")
+    difficulty: Mapped[str] = mapped_column(String(20), default="medium")  # теперь уровень (A1, A2, ...)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
@@ -72,10 +79,10 @@ class BattleRound(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     battle_id: Mapped[int] = mapped_column(Integer, ForeignKey("battles.id"), nullable=False)
     round_number: Mapped[int] = mapped_column(Integer)
-    question_type: Mapped[str] = mapped_column(String(20))  # "word_to_translate" или "translate_to_word"
+    question_type: Mapped[str] = mapped_column(String(20), default="text_input")
     word: Mapped[str] = mapped_column(String(100))
     correct_answer: Mapped[str] = mapped_column(String(100))
-    options: Mapped[str] = mapped_column(String(500))  # JSON-строка с массивом из 4 вариантов
+    options: Mapped[str] = mapped_column(String(500), nullable=True)
     player1_answer: Mapped[str] = mapped_column(String(100), nullable=True)
     player2_answer: Mapped[str] = mapped_column(String(100), nullable=True)
     player1_time: Mapped[float] = mapped_column(nullable=True)
