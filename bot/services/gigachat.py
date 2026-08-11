@@ -62,15 +62,8 @@ async def get_access_token() -> str:
 
 # ---------- Функция для парсинга ответа слов дня ----------
 def parse_word_response(raw: str):
-    """
-    Извлекает слово, транскрипцию, перевод и пример из сырого ответа GigaChat.
-    Поддерживает различные форматы.
-    Возвращает кортеж (word, transcription, translation, example) или None.
-    """
-    # Удаляем лишние пробелы и переносы строк
     raw = raw.replace('\n', ' ').replace('\r', '').strip()
 
-    # 1. Пробуем распарсить формат с жирным выделением **слово|транскрипция|перевод|пример**
     bold_match = re.search(r'\*\*(.+?)\*\*', raw)
     if bold_match:
         content = bold_match.group(1).strip()
@@ -80,12 +73,10 @@ def parse_word_response(raw: str):
             transcription = parts[1].strip()
             translation = parts[2].strip()
             example = parts[3].strip()
-            # Убираем возможные пояснения после примера
             example = re.sub(r'\s*\([^)]*\)\s*$', '', example).strip()
             if word and translation:
                 return (word, transcription, translation, example)
 
-    # 2. Пробуем формат с маркированным списком: - **слово**|[транскрипция]|перевод|пример
     list_match = re.search(r'-\s+\*\*(.+?)\*\*\s*\|?\s*\[?([^\]]*)\]?\s*\|?\s*(.+?)(?=\s*-\s|\s*$)', raw, re.DOTALL)
     if list_match:
         word = list_match.group(1).strip()
@@ -107,7 +98,6 @@ def parse_word_response(raw: str):
         if word and translation:
             return (word, transcription, translation, example)
 
-    # 3. Пробуем разделить по | (простой формат)
     parts = raw.split('|')
     if len(parts) >= 4:
         word = parts[0].strip()
@@ -117,7 +107,6 @@ def parse_word_response(raw: str):
         if word and translation:
             return (word, transcription, translation, example)
 
-    # 4. Извлечение через регулярные выражения (запасной вариант)
     word_match = re.search(r'\b([A-Za-z\']+)\b', raw)
     trans_match = re.search(r'[\[\(]([^\]]+)[\]\)]', raw)
     trans_ru_match = re.search(r'[А-Яа-яЁё][А-Яа-яЁё\s,;:!?]{2,}', raw)
@@ -133,7 +122,7 @@ def parse_word_response(raw: str):
 
     return None
 
-# ---------- Функция для слов дня (с улучшенным парсингом) ----------
+# ---------- Функция для слов дня ----------
 async def generate_word(difficulty: str = "medium", exclude: list = None) -> dict:
     if exclude is None:
         exclude = []
@@ -225,7 +214,7 @@ def fallback():
         "example": "Попробуйте ещё раз"
     }
 
-# ---------- Вспомогательные функции для валидации PvP вопросов ----------
+# ---------- Вспомогательные функции для PvP ----------
 def is_cyrillic(text: str) -> bool:
     return bool(re.search(r'[а-яА-ЯёЁ]', text))
 
@@ -260,66 +249,70 @@ def validate_question(question: dict, q_type: str) -> bool:
                 return False
     return True
 
-# ---------- Функция для извлечения JSON из текста (для PvP) ----------
 def extract_and_parse_json(text: str):
     text = text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
     text = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-    if not match:
-        stack = []
-        start = -1
-        for i, ch in enumerate(text):
-            if ch == '{':
-                if not stack:
-                    start = i
-                stack.append(ch)
-            elif ch == '}':
-                if stack:
-                    stack.pop()
-                    if not stack:
-                        candidate = text[start:i+1]
+    text = re.sub(r'\s*\([^()]*\)\s*', ' ', text)
+    text = re.sub(r'^\s*[\-\*\d]+\.?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    stack = []
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if not stack:
+                start = i
+            stack.append(ch)
+        elif ch == '}':
+            if stack:
+                stack.pop()
+                if not stack and start != -1:
+                    candidate = text[start:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        candidate = re.sub(r',\s*}', '}', candidate)
                         try:
                             return json.loads(candidate)
                         except json.JSONDecodeError:
                             pass
-        return None
-    candidate = match.group()
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
+    return None
 
 class GigaChatError(Exception):
     pass
 
-# ---------- Функция для генерации PvP вопросов ----------
-async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate") -> dict:
-    level_desc = {
-        "easy": "начального уровня (A1-A2)",
-        "medium": "среднего уровня (B1-B2)",
-        "hard": "продвинутого уровня (C1-C2)"
-    }.get(difficulty, "среднего уровня (B1-B2)")
+async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate", used_words: list = None) -> dict:
+    if used_words is None:
+        used_words = []
+    
+    word_type_hint = "существительное, прилагательное или глагол"
+    forbidden_words = ["easy", "medium", "hard", "elementary", "intermediate", "advanced", "beginner", "proficient"]
+    forbidden_words.extend(used_words)
+    forbidden_str = ", ".join(forbidden_words)
 
     if question_type == "word_to_translate":
         prompt = (
-            f"Придумай случайное английское слово {level_desc}. "
-            "Дай его перевод на русский язык и 3 неверных перевода на русский язык. "
-            "Слово не должно быть связано с уровнями сложности (не используй слова 'medium', 'easy', 'hard', 'elementary', 'intermediate', 'advanced' и т.п.). "
-            "Ответ строго в формате JSON: "
-            '{"word": "английское слово", "correct": "правильный перевод", "wrong": ["ложный1", "ложный2", "ложный3"]}'
+            f"Придумай случайное английское слово ({word_type_hint}), которое не связано с уровнями сложности. "
+            f"Запрещённые слова: {forbidden_str}. "
+            "Дай его перевод на русский язык и 3 неверных перевода на русский. "
+            "Варианты должны быть правдоподобными, но не синонимами правильного ответа. "
+            "Ответ должен быть только в формате JSON: "
+            '{"word": "английское слово", "correct": "правильный перевод", "wrong": ["ложный1", "ложный2", "ложный3"]}. '
+            "Не добавляй пояснений, комментариев или дополнительного текста."
         )
     else:
         prompt = (
-            f"Придумай случайное русское слово, соответствующее английскому слову {level_desc}. "
+            f"Придумай случайное русское слово ({word_type_hint}), соответствующее английскому слову, которое не связано с уровнями сложности. "
+            f"Запрещённые слова: {forbidden_str}. "
             "Дай правильный английский перевод и 3 неверных английских перевода. "
-            "Слово не должно быть связано с уровнями сложности (не используй слова 'medium', 'easy', 'hard', 'elementary', 'intermediate', 'advanced' и т.п.). "
-            "Ответ строго в формате JSON: "
-            '{"word": "русское слово", "correct": "правильное английское слово", "wrong": ["ложное1", "ложное2", "ложное3"]}'
+            "Варианты должны быть правдоподобными, но не синонимами правильного ответа. "
+            "Ответ должен быть только в формате JSON: "
+            '{"word": "русское слово", "correct": "правильное английское слово", "wrong": ["ложный1", "ложный2", "ложный3"]}. '
+            "Не добавляй пояснений, комментариев или дополнительного текста."
         )
 
-    logger.info(f"Запрос к GigaChat для PvP: {prompt[:100]}...")
+    logger.info(f"Запрос к GigaChat для PvP: {prompt[:150]}...")
 
     try:
         token = await get_access_token()
@@ -335,7 +328,7 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
     payload = {
         "model": "GigaChat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
+        "temperature": 0.6,
         "max_tokens": 250,
     }
 
@@ -385,5 +378,7 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
             except Exception as e:
                 logger.error(f"Ошибка при запросе: {e}")
                 await asyncio.sleep(1)
+
+    raise GigaChatError("Не удалось сгенерировать вопрос после 10 попыток")
 
     raise GigaChatError("Не удалось сгенерировать вопрос после 10 попыток")
