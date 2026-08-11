@@ -40,6 +40,13 @@ def get_question_keyboard(options: list, round_id: int) -> InlineKeyboardMarkup:
     )
     return keyboard
 
+async def get_queue_count(session) -> int:
+    """Возвращает количество игроков в очереди на PvP."""
+    count = await session.scalar(
+        select(func.count()).select_from(Battle).where(Battle.status == "waiting")
+    )
+    return count or 0
+
 @router.message(Command("battle"))
 async def cmd_battle(message: types.Message, state: FSMContext):
     await start_battle_search(message, state)
@@ -122,8 +129,9 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                 battle = await create_battle(session, user.id, difficulty)
                 await state.update_data(battle_id=battle.id)
                 await state.set_state(BattleStates.waiting_for_opponent)
+                queue_count = await get_queue_count(session)
                 await message.answer(
-                    "⏳ Ищем соперника... Пожалуйста, подождите.\n"
+                    f"⏳ Ищем соперника... В очереди сейчас {queue_count} человек.\n"
                     "Вы можете отменить поиск командой /cancel_battle"
                 )
         except Exception as e:
