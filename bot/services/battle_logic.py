@@ -36,9 +36,11 @@ async def join_battle(session: AsyncSession, battle: Battle, player2_id: int) ->
     await session.refresh(battle)
     return battle
 
-async def generate_round_question(difficulty: str = "medium") -> dict:
+async def generate_round_question(difficulty: str = "medium", used_words: list = None) -> dict:
+    if used_words is None:
+        used_words = []
     q_type = random.choice(["word_to_translate", "translate_to_word"])
-    question = await generate_question(difficulty, q_type)
+    question = await generate_question(difficulty, q_type, used_words)
     question["question_type"] = q_type
     return question
 
@@ -49,14 +51,17 @@ async def create_rounds_for_battle(session: AsyncSession, battle_id: int, diffic
         logger.error(f"Битва {battle_id} не найдена")
         return
 
+    used_words = []
+
     for i in range(1, rounds_count + 1):
         try:
-            question = await generate_round_question(difficulty)
+            question = await generate_round_question(difficulty, used_words)
         except GigaChatError as e:
             logger.error(f"Ошибка генерации вопроса для раунда {i}: {e}")
-            # Удаляем уже созданные раунды (если они были)
             await session.rollback()
             raise GigaChatError(f"Не удалось сгенерировать вопросы для битвы: {e}") from e
+
+        used_words.append(question["word"])
 
         round_obj = BattleRound(
             battle_id=battle_id,
