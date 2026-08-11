@@ -7,7 +7,6 @@ from bot.keyboards.reply import get_main_keyboard
 from bot.database import AsyncSessionLocal
 from bot.models import User, UserSettings, LearnedWord
 from bot.services.gigachat import generate_word
-from bot.services.settings import get_or_create_settings
 from bot.handlers.battle import start_battle_search
 
 router = Router()
@@ -32,6 +31,16 @@ def get_word_keyboard(word: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+async def get_or_create_settings(user_id: int, session) -> UserSettings:
+    settings = await session.scalar(
+        select(UserSettings).where(UserSettings.user_id == user_id)
+    )
+    if not settings:
+        settings = UserSettings(user_id=user_id, difficulty="medium")
+        session.add(settings)
+        await session.commit()
+    return settings
 
 async def show_word(message_or_callback, state: FSMContext, new_word: bool = True):
     if isinstance(message_or_callback, types.Message):
@@ -64,19 +73,19 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
         if new_word:
             word_data = await generate_word(difficulty, exclude_list)
             await state.update_data(current_word=word_data["word"])
+            await state.update_data(current_word_data=word_data)  # сохраняем полные данные
         else:
             data = await state.get_data()
-            word_data = data.get("current_word")
+            word_data = data.get("current_word_data")
             if not word_data:
                 word_data = await generate_word(difficulty, exclude_list)
                 await state.update_data(current_word=word_data["word"])
-            else:
-                word_data = await generate_word(difficulty, exclude_list)
-                await state.update_data(current_word=word_data["word"])
+                await state.update_data(current_word_data=word_data)
 
         if word_data["word"] in exclude_list:
             word_data = await generate_word(difficulty, exclude_list)
             await state.update_data(current_word=word_data["word"])
+            await state.update_data(current_word_data=word_data)
 
         text = (
             f"📚 *Слово дня*\n\n"
@@ -111,6 +120,10 @@ async def learn_word_callback(callback: types.CallbackQuery, state: FSMContext):
     word = callback.data.split("_", 1)[1]
     user_id = callback.from_user.id
 
+    data = await state.get_data()
+    word_data = data.get("current_word_data", {})
+    translation = word_data.get("translation", "")
+
     async with AsyncSessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == user_id))
         if not user:
@@ -124,10 +137,13 @@ async def learn_word_callback(callback: types.CallbackQuery, state: FSMContext):
             )
         )
         if not existing:
-            learned = LearnedWord(user_id=user.id, word=word)
+            learned = LearnedWord(user_id=user.id, word=word, translation=translation)
             session.add(learned)
             await session.commit()
-            await callback.message.edit_text(f"✅ Слово *{word}* добавлено в выученные!", parse_mode="Markdown")
+            await callback.message.edit_text(
+                f"✅ Слово *{word}*" + (f" — {translation}" if translation else "") + " добавлено в выученные!",
+                parse_mode="Markdown"
+            )
         else:
             await callback.message.edit_text(f"ℹ️ Слово *{word}* уже было выучено.", parse_mode="Markdown")
 
@@ -216,17 +232,21 @@ async def show_progress(message_or_callback):
         learned_count = await session.scalar(
             select(func.count()).select_from(LearnedWord).where(LearnedWord.user_id == user.id)
         )
-        learned_words = await session.scalars(
-            select(LearnedWord.word).where(LearnedWord.user_id == user.id).limit(20)
+        result = await session.execute(
+            select(LearnedWord.word, LearnedWord.translation)
+            .where(LearnedWord.user_id == user.id)
+            .limit(20)
         )
-        word_list = list(learned_words)
+        word_list = result.all()
 
         if learned_count == 0:
             text = "📊 *Мой прогресс*\n\nВы ещё не выучили ни одного слова."
         else:
             text = f"📊 *Мой прогресс*\n\n✅ Выучено слов: *{learned_count}*\n\n"
             if word_list:
-                text += "📝 *Последние выученные:*\n" + "\n".join(f"• {w}" for w in word_list)
+                text += "📝 *Последние выученные:*\n" + "\n".join(
+                    f"• {w} — {t}" if t else f"• {w}" for w, t in word_list
+                )
             else:
                 text += "Нет недавних слов."
 
@@ -279,5 +299,3 @@ async def text_battle(message: types.Message, state: FSMContext):
 @router.message(lambda message: message.text == "📊 Мой прогресс")
 async def text_progress(message: types.Message):
     await show_progress(message)
-
-# Обработчик для "📚 Слова дня" уже есть выше
