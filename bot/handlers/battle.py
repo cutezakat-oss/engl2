@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 
 router = Router()
 
+# ---------- Вспомогательные клавиатуры ----------
 def get_back_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -25,21 +26,27 @@ def get_back_keyboard():
         ]
     )
 
+def get_cancel_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить поиск", callback_data="cancel_search")]
+        ]
+    )
+
 async def get_queue_count(session) -> int:
+    """Возвращает количество игроков в очереди на PvP."""
     count = await session.scalar(
         select(func.count()).select_from(Battle).where(Battle.status == "waiting")
     )
     return count or 0
 
-# ---------- Обновление ELO ----------
 async def update_elo(session, winner_id: int, loser_id: int):
-    """Обновляет ELO по формуле. Простая версия с K=32."""
+    """Обновляет ELO по формуле с K=32."""
     K = 32
     winner = await session.get(User, winner_id)
     loser = await session.get(User, loser_id)
     if not winner or not loser:
         return
-    # Ожидаемый результат
     expected_win = 1 / (1 + 10 ** ((loser.elo - winner.elo) / 400))
     expected_lose = 1 - expected_win
     new_winner_elo = round(winner.elo + K * (1 - expected_win))
@@ -79,6 +86,11 @@ async def cancel_battle_search(message: types.Message, state: FSMContext):
     else:
         await message.answer("У вас нет активного поиска.")
 
+@router.callback_query(lambda c: c.data == "cancel_search")
+async def cancel_search_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await cancel_battle_search(callback.message, state)
+
 # ---------- Основная логика поиска соперника ----------
 async def start_battle_search(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -101,23 +113,17 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                 await message.answer("⚠️ У вас уже есть активная битва. Дождитесь её завершения.")
                 return
 
-            # Определяем уровень по ELO
             level = get_level_by_elo(user.elo)
 
             waiting_battle = await find_waiting_battle(session)
             if waiting_battle:
-                # Присоединяемся к существующей
                 battle = await join_battle(session, waiting_battle, user.id)
                 await state.update_data(battle_id=battle.id)
                 await state.set_state(BattleStates.battle_active)
 
                 player1 = await session.get(User, battle.player1_id)
                 player1_telegram_id = player1.telegram_id if player1 else None
-
-                # Уровень битвы – средний уровень обоих игроков
-                # Но мы используем уровень первого игрока (или можно средний)
-                # Для простоты оставим уровень первого игрока
-                level = battle.difficulty  # уже сохранён при создании
+                level = battle.difficulty  # уровень битвы (сохраняется при создании)
 
                 await message.answer("⏳ Ожидайте начала битвы... Генерируем вопросы...")
                 if player1_telegram_id and player1_telegram_id != user_id:
@@ -126,7 +132,6 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                         "⏳ Ожидайте начала битвы... Генерируем вопросы..."
                     )
 
-                # Создаём раунды (передаём уровень)
                 await create_rounds_for_battle(session, battle.id, level, 10)
 
                 await message.answer("✅ Соперник найден! Битва начинается!")
@@ -143,14 +148,16 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                     logger.error(f"Ошибка при запуске первого раунда: {e}", exc_info=True)
                     await message.answer(f"❌ Произошла ошибка при запуске битвы. Попробуйте позже.")
             else:
-                # Создаём новую битву
+                logger.info(f"Создаём новую битву для игрока {user.id}")
                 battle = await create_battle(session, user.id, level)
                 await state.update_data(battle_id=battle.id)
                 await state.set_state(BattleStates.waiting_for_opponent)
                 queue_count = await get_queue_count(session)
+                
                 await message.answer(
                     f"⏳ Ищем соперника... В очереди сейчас {queue_count} человек.\n"
-                    "Вы можете отменить поиск командой /cancel_battle"
+                    "Вы можете отменить поиск командой /cancel_battle",
+                    reply_markup=get_cancel_keyboard()
                 )
         except Exception as e:
             logger.error(f"Ошибка в start_battle_search: {e}", exc_info=True)
@@ -209,7 +216,6 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
         # Устанавливаем состояние ожидания ответа
         await state.update_data(current_round_id=round_obj.id)
         await state.update_data(round_start_time=asyncio.get_event_loop().time())
-        # Устанавливаем состояние, чтобы обрабатывать текстовые сообщения
         await state.set_state(BattleStates.waiting_for_answer)
 
         # Устанавливаем таймаут (если через 10 секунд никто не ответит)
@@ -243,7 +249,6 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
 
         # Если кто-то ответил, очко получает он, иначе пропуск
         if round_obj.player1_answer is None and round_obj.player2_answer is not None:
-            # второй ответил, первый нет
             battle.player2_score += 1
         elif round_obj.player2_answer is None and round_obj.player1_answer is not None:
             battle.player1_score += 1
