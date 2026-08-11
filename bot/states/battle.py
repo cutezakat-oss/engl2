@@ -1,5 +1,6 @@
 from aiogram.fsm.state import State, StatesGroup
 
 class BattleStates(StatesGroup):
-    waiting_for_opponent = State()   # в очереди
-    battle_active = State()          # в процессе битвы
+    waiting_for_opponent = State()
+    battle_active = State()
+    waiting_for_answer = State() 
