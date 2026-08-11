@@ -282,7 +282,7 @@ def extract_and_parse_json(text: str):
 class GigaChatError(Exception):
     pass
 
-# ---------- НОВЫЙ ПРОМПТ ДЛЯ PVP ----------
+# ---------- НОВАЯ ФУНКЦИЯ ДЛЯ PVP ----------
 async def generate_question(difficulty: str = "medium", question_type: str = "word_to_translate", used_words: list = None) -> dict:
     if used_words is None:
         used_words = []
@@ -290,26 +290,21 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
     forbidden = ["easy", "medium", "hard", "elementary", "intermediate", "advanced", "beginner", "proficient"] + used_words
     forbidden_str = ", ".join(forbidden)
 
-    # Строгий промпт с примером
     if question_type == "word_to_translate":
         prompt = (
-            "Ты — генератор вопросов для викторины по английскому языку.\n"
-            "Сгенерируй вопрос: дано английское слово (существительное, прилагательное или глагол), нужно выбрать его правильный перевод на русский язык из четырёх вариантов.\n"
-            f"Запрещённые слова: {forbidden_str} (их нельзя использовать в качестве слова).\n"
-            "ВНИМАНИЕ: все варианты ответа (правильный и три неправильных) должны быть на РУССКОМ языке! Никаких английских слов в вариантах!\n"
-            "Пример правильного ответа:\n"
-            '{"word": "cat", "correct": "кошка", "wrong": ["собака", "птица", "рыба"]}\n'
-            "Теперь сгенерируй свой вопрос в точности в таком же формате JSON (без пояснений, только JSON)."
+            "Придумай случайное английское слово (существительное, прилагательное или глагол), которое не входит в список запрещённых слов.\n"
+            f"Запрещённые слова: {forbidden_str}.\n"
+            "Дай его перевод на русский язык и 3 неверных перевода на русский язык. Все варианты должны быть на русском языке.\n"
+            "Верни только JSON-объект с полями: word (английское слово), correct (правильный перевод), wrong (массив из трёх ложных переводов).\n"
+            "Не добавляй пояснений или комментариев."
         )
-    else:  # translate_to_word
+    else:
         prompt = (
-            "Ты — генератор вопросов для викторины по английскому языку.\n"
-            "Сгенерируй вопрос: дано русское слово (существительное, прилагательное или глагол), нужно выбрать его правильный перевод на английский язык из четырёх вариантов.\n"
-            f"Запрещённые слова: {forbidden_str} (их нельзя использовать в качестве слова).\n"
-            "ВНИМАНИЕ: все варианты ответа (правильный и три неправильных) должны быть на АНГЛИЙСКОМ языке! Никаких русских слов в вариантах!\n"
-            "Пример правильного ответа:\n"
-            '{"word": "кошка", "correct": "cat", "wrong": ["dog", "bird", "fish"]}\n'
-            "Теперь сгенерируй свой вопрос в точности в таком же формате JSON (без пояснений, только JSON)."
+            "Придумай случайное русское слово (существительное, прилагательное или глагол), соответствующее английскому слову, которое не входит в список запрещённых слов.\n"
+            f"Запрещённые слова: {forbidden_str}.\n"
+            "Дай правильный английский перевод и 3 неверных английских перевода. Все варианты должны быть на английском языке.\n"
+            "Верни только JSON-объект с полями: word (русское слово), correct (правильный перевод на английском), wrong (массив из трёх ложных переводов на английском).\n"
+            "Не добавляй пояснений или комментариев."
         )
 
     logger.info(f"Запрос к GigaChat для PvP: {prompt[:200]}...")
@@ -328,13 +323,13 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
     payload = {
         "model": "GigaChat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,  # снижаем для стабильности
-        "max_tokens": 300,
+        "temperature": 0.7,  # повышаем для вариативности
+        "max_tokens": 350,
     }
 
     connector = aiohttp.TCPConnector(ssl=ssl_context)
     async with aiohttp.ClientSession(connector=connector) as session:
-        for attempt in range(15):  # больше попыток
+        for attempt in range(15):
             try:
                 async with session.post(GIGACHAT_API_URL, json=payload, headers=headers, timeout=30) as resp:
                     status = resp.status
@@ -359,9 +354,14 @@ async def generate_question(difficulty: str = "medium", question_type: str = "wo
                                 logger.warning(f"Неверный формат wrong: {wrong}")
                                 continue
 
-                            # Дополнительная проверка на запрещённые слова
-                            if word.lower() in forbidden:
+                            # Проверка: слово не должно быть в запрещённом списке (регистронезависимо)
+                            if word.lower() in [w.lower() for w in forbidden]:
                                 logger.warning(f"Слово '{word}' в запрещённом списке, пробуем снова...")
+                                continue
+
+                            # Проверка длины слова (минимум 3 символа)
+                            if len(word) < 3:
+                                logger.warning(f"Слово '{word}' слишком короткое, пробуем снова...")
                                 continue
 
                             options = [correct] + wrong
