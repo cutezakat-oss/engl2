@@ -33,15 +33,21 @@ def get_cancel_keyboard():
         ]
     )
 
+def get_exit_keyboard():
+    """Клавиатура с кнопкой выхода из боя."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚪 Выйти из боя", callback_data="exit_battle")]
+        ]
+    )
+
 async def get_queue_count(session) -> int:
-    """Возвращает количество игроков в очереди на PvP."""
     count = await session.scalar(
         select(func.count()).select_from(Battle).where(Battle.status == "waiting")
     )
     return count or 0
 
 async def update_elo(session, winner_id: int, loser_id: int):
-    """Обновляет ELO по формуле с K=32."""
     K = 32
     winner = await session.get(User, winner_id)
     loser = await session.get(User, loser_id)
@@ -91,6 +97,69 @@ async def cancel_search_callback(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
     await cancel_battle_search(callback.message, state)
 
+# ---------- Выход из боя ----------
+@router.callback_query(lambda c: c.data == "exit_battle")
+async def exit_battle_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user:
+            await callback.message.edit_text("❌ Вы не зарегистрированы.")
+            return
+
+        battle = await session.scalar(
+            select(Battle).where(
+                ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
+                Battle.status == "active"
+            )
+        )
+        if not battle:
+            await callback.message.edit_text("❌ Нет активной битвы.")
+            return
+
+        # Определяем соперника
+        opponent_id = battle.player2_id if battle.player1_id == user.id else battle.player1_id
+        if not opponent_id:
+            # Если соперник не найден (баг), завершаем битву с ничьей
+            battle.status = "finished"
+            battle.finished_at = func.now()
+            await session.commit()
+            await callback.message.edit_text("❌ Битва прервана (ошибка соперника).")
+            return
+
+        # Победитель – соперник
+        battle.winner_id = opponent_id
+        battle.status = "finished"
+        battle.finished_at = func.now()
+        # Обновляем счёт (победа соперника)
+        if battle.player1_id == user.id:
+            battle.player2_score = 100  # условно, чтобы победил соперник
+        else:
+            battle.player1_score = 100
+        await session.commit()
+        await session.refresh(battle)
+
+        # Обновляем ELO
+        await update_elo(session, opponent_id, user.id)
+
+        # Уведомляем обоих игроков
+        for pid in [battle.player1_id, battle.player2_id]:
+            p = await session.get(User, pid)
+            if p:
+                try:
+                    await callback.bot.send_message(
+                        p.telegram_id,
+                        f"🚪 Игрок {user.first_name} вышел из боя. Победа присуждена сопернику!",
+                        reply_markup=get_back_keyboard()
+                    )
+                except Exception:
+                    pass
+
+        await state.clear()
+        await callback.message.edit_text("✅ Вы вышли из боя.")
+
 # ---------- Основная логика поиска соперника ----------
 async def start_battle_search(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -123,7 +192,7 @@ async def start_battle_search(message: types.Message, state: FSMContext):
 
                 player1 = await session.get(User, battle.player1_id)
                 player1_telegram_id = player1.telegram_id if player1 else None
-                level = battle.difficulty  # уровень битвы (сохраняется при создании)
+                level = battle.difficulty
 
                 await message.answer("⏳ Ожидайте начала битвы... Генерируем вопросы...")
                 if player1_telegram_id and player1_telegram_id != user_id:
@@ -196,10 +265,9 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
 
         logger.info(f"Отправляем вопрос раунда {round_obj.round_number} для битвы {battle_id}")
 
-        # Отправляем вопрос без вариантов
         question_text = f"📝 *Вопрос {round_obj.round_number}/{battle.rounds_total}*\n\nПереведите слово:\n*{round_obj.word}*"
 
-        # Отправляем обоим игрокам
+        # Отправляем вопрос каждому игроку с кнопкой выхода
         for player_id in [battle.player1_id, battle.player2_id]:
             player = await session.get(User, player_id)
             if player:
@@ -207,23 +275,24 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
                     await bot.send_message(
                         player.telegram_id,
                         question_text,
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
+                        reply_markup=get_exit_keyboard()  # <-- Добавляем кнопку выхода
                     )
                     logger.info(f"Вопрос отправлен игроку {player.telegram_id}")
                 except Exception as e:
                     logger.error(f"Не удалось отправить вопрос игроку {player.telegram_id}: {e}")
 
-        # Устанавливаем состояние ожидания ответа
+        # Сохраняем в FSM id раунда и время начала
         await state.update_data(current_round_id=round_obj.id)
         await state.update_data(round_start_time=asyncio.get_event_loop().time())
-        await state.set_state(BattleStates.waiting_for_answer)
 
-        # Устанавливаем таймаут (если через 10 секунд никто не ответит)
+        # Устанавливаем таймаут (10 секунд) – запускаем фоновую задачу
         asyncio.create_task(timeout_round(message_or_callback, state, battle_id, round_obj.id, session))
     except Exception as e:
         logger.error(f"Ошибка в start_round: {e}", exc_info=True)
         await bot.send_message(chat_id, f"❌ Произошла ошибка при запуске раунда. Попробуйте позже.")
 
+# ---------- Таймаут раунда ----------
 async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, round_id: int, session):
     await asyncio.sleep(10)
     logger.info(f"Таймаут для раунда {round_id} битвы {battle_id}")
@@ -233,11 +302,7 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
         bot = message_or_callback.bot
 
     try:
-        # Проверяем, не завершился ли раунд уже
-        data = await state.get_data()
-        if data.get("round_finished", False):
-            return
-
+        # Проверяем, не завершился ли раунд уже (оба ответили)
         round_obj = await session.get(BattleRound, round_id)
         if not round_obj:
             return
@@ -247,7 +312,7 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
         if not battle or battle.status != "active":
             return
 
-        # Если кто-то ответил, очко получает он, иначе пропуск
+        # Если один ответил, очко ему, иначе ничья
         if round_obj.player1_answer is None and round_obj.player2_answer is not None:
             battle.player2_score += 1
         elif round_obj.player2_answer is None and round_obj.player1_answer is not None:
@@ -266,70 +331,78 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
                 try:
                     await bot.send_message(
                         player.telegram_id,
-                        "⏰ Время вышло! Переходим к следующему вопросу."
+                        "⏰ Время вышло! Переходим к следующему вопросу.",
+                        reply_markup=get_exit_keyboard()  # сохраняем кнопку выхода
                     )
                 except Exception:
                     pass
 
-        # Сброс состояния
-        await state.update_data(round_finished=True)
-        await state.set_state(BattleStates.battle_active)
-        # Запускаем следующий раунд
+        # Переходим к следующему раунду
         await start_round(message_or_callback, state, battle_id, session)
     except Exception as e:
         logger.error(f"Ошибка в timeout_round: {e}", exc_info=True)
 
-# ---------- Обработчик текстового ответа ----------
-@router.message(BattleStates.waiting_for_answer)
+# ---------- Обработчик текстовых ответов (без FSM) ----------
+@router.message()
 async def handle_answer(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    text = message.text.strip()
-
-    data = await state.get_data()
-    round_id = data.get("current_round_id")
-    if not round_id:
-        await message.answer("❌ Нет активного вопроса.")
+    # Игнорируем команды и сообщения, начинающиеся с '/'
+    if message.text.startswith('/'):
         return
 
+    user_id = message.from_user.id
+    text = message.text.strip()
+    if not text:
+        return
+
+    # Проверяем, есть ли у пользователя активная битва
     async with AsyncSessionLocal() as session:
         try:
-            round_obj = await session.get(BattleRound, round_id)
+            user = await session.scalar(select(User).where(User.telegram_id == user_id))
+            if not user:
+                return
+
+            battle = await session.scalar(
+                select(Battle).where(
+                    ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
+                    Battle.status == "active"
+                )
+            )
+            if not battle:
+                return
+
+            # Находим текущий раунд (который ещё не завершён)
+            round_obj = await session.scalar(
+                select(BattleRound).where(
+                    BattleRound.battle_id == battle.id,
+                    BattleRound.round_number == battle.current_round + 1
+                )
+            )
             if not round_obj:
-                await message.answer("❌ Раунд не найден.")
                 return
 
-            battle = await session.get(Battle, round_obj.battle_id)
-            if not battle or battle.status != "active":
-                await message.answer("❌ Битва уже завершена.")
+            # Проверяем, не ответил ли уже этот игрок
+            if battle.player1_id == user.id and round_obj.player1_answer is not None:
+                await message.answer("Вы уже ответили на этот вопрос.")
+                return
+            if battle.player2_id == user.id and round_obj.player2_answer is not None:
+                await message.answer("Вы уже ответили на этот вопрос.")
                 return
 
-            player = await session.scalar(select(User).where(User.telegram_id == user_id))
-            if not player:
-                await message.answer("❌ Вы не зарегистрированы.")
-                return
-
-            # Определяем, кто отвечает
-            if battle.player1_id == player.id:
-                if round_obj.player1_answer is not None:
-                    await message.answer("Вы уже ответили на этот вопрос.")
-                    return
+            # Сохраняем ответ
+            if battle.player1_id == user.id:
                 round_obj.player1_answer = text
-                round_obj.player1_time = asyncio.get_event_loop().time() - data.get("round_start_time", 0)
-            elif battle.player2_id == player.id:
-                if round_obj.player2_answer is not None:
-                    await message.answer("Вы уже ответили на этот вопрос.")
-                    return
+                round_obj.player1_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
+            elif battle.player2_id == user.id:
                 round_obj.player2_answer = text
-                round_obj.player2_time = asyncio.get_event_loop().time() - data.get("round_start_time", 0)
+                round_obj.player2_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
             else:
-                await message.answer("❌ Вы не участник этой битвы.")
                 return
 
             await session.commit()
 
             # Проверяем, ответили ли оба
             if round_obj.player1_answer is not None and round_obj.player2_answer is not None:
-                # Определяем победителя раунда
+                # Обрабатываем результат раунда
                 correct = round_obj.correct_answer.lower().strip()
                 p1_correct = round_obj.player1_answer.lower().strip() == correct
                 p2_correct = round_obj.player2_answer.lower().strip() == correct
@@ -372,10 +445,7 @@ async def handle_answer(message: types.Message, state: FSMContext):
                         except Exception:
                             pass
 
-                # Сброс состояния и переход к следующему раунду
-                await state.update_data(round_finished=True)
-                await state.set_state(BattleStates.battle_active)
-
+                # Переходим к следующему раунду или завершаем битву
                 if battle.current_round >= battle.rounds_total:
                     await finish_battle(message, state, battle, session)
                 else:
@@ -391,7 +461,6 @@ async def handle_answer(message: types.Message, state: FSMContext):
 async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, session):
     battle.status = "finished"
     battle.finished_at = func.now()
-    # Определяем победителя
     if battle.player1_score > battle.player2_score:
         battle.winner_id = battle.player1_id
     elif battle.player2_score > battle.player1_score:
@@ -402,13 +471,9 @@ async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, 
     await session.commit()
     await session.refresh(battle)
 
-    # Обновляем ELO
     if battle.winner_id:
         loser_id = battle.player2_id if battle.winner_id == battle.player1_id else battle.player1_id
         await update_elo(session, battle.winner_id, loser_id)
-    else:
-        # Ничья: ELO не меняется
-        pass
 
     result_text = (
         f"🏁 *Битва завершена!*\n\n"
