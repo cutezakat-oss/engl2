@@ -79,24 +79,20 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                 await state.update_data(battle_id=battle.id)
                 await state.set_state(BattleStates.battle_active)
 
-                # Сохраняем telegram_id первого игрока до начала генерации
                 player1 = await session.get(User, battle.player1_id)
                 player1_telegram_id = player1.telegram_id if player1 else None
 
-                # ---- ОТПРАВЛЯЕМ СООБЩЕНИЕ ОБ ОЖИДАНИИ ПЕРЕД ГЕНЕРАЦИЕЙ ----
                 await message.answer("⏳ Ожидайте начала битвы... Генерируем вопросы...")
                 if player1_telegram_id and player1_telegram_id != user_id:
                     await message.bot.send_message(
                         player1_telegram_id,
                         "⏳ Ожидайте начала битвы... Генерируем вопросы..."
                     )
-                # ---------------------------------------------------------
 
                 try:
                     await create_rounds_for_battle(session, battle.id, difficulty, 10)
                 except GigaChatError as e:
                     logger.error(f"Ошибка генерации вопросов: {e}")
-                    # Удаляем битву из БД
                     await session.delete(battle)
                     await session.commit()
                     await message.answer("❌ Не удалось сгенерировать вопросы для битвы. Попробуйте позже.")
@@ -263,7 +259,7 @@ async def handle_battle_answer(callback: types.CallbackQuery, state: FSMContext)
     data = callback.data.split("_")
     round_id = int(data[2])
     option_index = int(data[3])
-    user_id = callback.from_user.id  # telegram_id
+    user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
         try:
