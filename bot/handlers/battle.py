@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func
 from bot.database import AsyncSessionLocal
-from bot.models import User, Battle, BattleRound, StudyWord
+from bot.models import User, Battle, BattleRound, StudyWord, Invite
 from bot.services.battle_logic import create_battle, find_waiting_battle, join_battle, create_rounds_for_battle
 from bot.services.word_levels import get_level_by_elo
 from bot.states.battle import BattleStates
@@ -526,7 +526,7 @@ async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, 
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Реванш", callback_data=f"rematch_{battle.id}_{player_id}")],
+                [InlineKeyboardButton(text="🔄 Реванш", callback_data=f"rematch_request_{battle.id}_{player_id}")],
                 [InlineKeyboardButton(text="👤 Пригласить друга", callback_data=f"invite_friend_{player_id}")]
             ]
         )
@@ -600,66 +600,7 @@ async def skip_study_callback(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("✅ Пропущено.")
 
-# ---------- Обработчики реванша и приглашения ----------
-@router.callback_query(lambda c: c.data.startswith("rematch_"))
-async def rematch_callback(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = callback.data.split("_")
-    battle_id = int(data[1])
-    player_id = int(data[2])
-    user_id = callback.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == user_id))
-        if not user or user.id != player_id:
-            await callback.message.edit_text("❌ Вы не можете запросить реванш за другого игрока.")
-            return
-
-        old_battle = await session.get(Battle, battle_id)
-        if not old_battle:
-            await callback.message.edit_text("❌ Битва не найдена.")
-            return
-
-        opponent_id = old_battle.player2_id if player_id == old_battle.player1_id else old_battle.player1_id
-        if not opponent_id:
-            await callback.message.edit_text("❌ Соперник не найден.")
-            return
-
-        opponent = await session.get(User, opponent_id)
-        if not opponent:
-            await callback.message.edit_text("❌ Соперник не найден.")
-            return
-
-        existing_battle = await session.scalar(
-            select(Battle).where(
-                ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
-                Battle.status.in_(["waiting", "active"])
-            )
-        )
-        if existing_battle:
-            await callback.message.edit_text("⚠️ У вас уже есть активная битва. Дождитесь её завершения.")
-            return
-
-        level = get_level_by_elo(user.elo)
-        new_battle = await create_battle(session, user.id, level)
-        new_battle.player2_id = opponent_id
-        new_battle.status = "active"
-        await session.commit()
-
-        await callback.bot.send_message(
-            user.telegram_id,
-            f"🔄 Реванш с {opponent.first_name} начат! Битва создана."
-        )
-        await callback.bot.send_message(
-            opponent.telegram_id,
-            f"🔄 Игрок {user.first_name} вызвал вас на реванш! Битва создана."
-        )
-
-        await create_rounds_for_battle(session, new_battle.id, level, 10)
-        await start_round(callback, state, new_battle.id, session)
-
-        await callback.message.edit_text("✅ Реванш создан! Битва начинается...")
-
+# ---------- Обработчики приглашений и реванша ----------
 @router.callback_query(lambda c: c.data.startswith("invite_friend_"))
 async def invite_friend_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -675,12 +616,15 @@ async def invite_friend_callback(callback: types.CallbackQuery, state: FSMContex
         "Пример: @john или 123456789"
     )
     await state.set_state(BattleStates.waiting_for_invite)
-    await state.update_data(inviter_id=user_id)
+    await state.update_data(invite_type="direct")
 
+# Обработчик ввода @username (приглашение до боя или реванш)
 @router.message(BattleStates.waiting_for_invite)
 async def process_invite(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     invite_text = message.text.strip()
+    data = await state.get_data()
+    invite_type = data.get("invite_type", "direct")
 
     async with AsyncSessionLocal() as session:
         inviter = await session.scalar(select(User).where(User.telegram_id == user_id))
@@ -709,6 +653,7 @@ async def process_invite(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
+        # Проверяем, есть ли у приглашаемого активная битва
         existing_battle = await session.scalar(
             select(Battle).where(
                 ((Battle.player1_id == invitee.id) | (Battle.player2_id == invitee.id)),
@@ -720,24 +665,222 @@ async def process_invite(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        level = get_level_by_elo(inviter.elo)
-        new_battle = await create_battle(session, inviter.id, level)
-        new_battle.player2_id = invitee.id
-        new_battle.status = "active"
+        # Запрашиваем сложность
+        await state.update_data(invitee_id=invitee.id, invite_type=invite_type)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🟢 Лёгкая", callback_data="invite_difficulty_easy"),
+                 InlineKeyboardButton(text="🟡 Средняя", callback_data="invite_difficulty_medium")],
+                [InlineKeyboardButton(text="🔴 Сложная", callback_data="invite_difficulty_hard")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="invite_cancel")]
+            ]
+        )
+        await message.answer(
+            "Выберите сложность для битвы:",
+            reply_markup=keyboard
+        )
+        await state.set_state(BattleStates.waiting_for_invite_accept)
+
+# Обработчики выбора сложности
+@router.callback_query(lambda c: c.data.startswith("invite_difficulty_"))
+async def invite_difficulty_chosen(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    difficulty = callback.data.split("_")[2]  # easy, medium, hard
+    data = await state.get_data()
+    invitee_id = data.get("invitee_id")
+    inviter_id = callback.from_user.id
+    invite_type = data.get("invite_type", "direct")
+
+    if not invitee_id:
+        await callback.message.edit_text("❌ Ошибка: не найден приглашаемый.")
+        await state.clear()
+        return
+
+    async with AsyncSessionLocal() as session:
+        inviter = await session.get(User, inviter_id)
+        invitee = await session.get(User, invitee_id)
+        if not inviter or not invitee:
+            await callback.message.edit_text("❌ Ошибка: пользователь не найден.")
+            await state.clear()
+            return
+
+        # Преобразуем easy/medium/hard в уровень для битвы
+        level_map = {"easy": "A1", "medium": "B1", "hard": "C1"}
+        level = level_map.get(difficulty, "A1")
+
+        # Создаём приглашение
+        invite = Invite(
+            inviter_id=inviter.id,
+            invitee_id=invitee.id,
+            difficulty=difficulty,
+            status="pending"
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+
+        # Отправляем приглашение второму игроку
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Принять", callback_data=f"invite_accept_{invite.id}")],
+                [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"invite_decline_{invite.id}")]
+            ]
+        )
+        await callback.bot.send_message(
+            invitee.telegram_id,
+            f"🎮 Игрок {inviter.first_name} приглашает вас на бой (сложность: {difficulty}).\nПринять?",
+            reply_markup=keyboard
+        )
+        await callback.message.edit_text("✅ Приглашение отправлено! Ожидайте ответа.")
+        await state.clear()
+
+@router.callback_query(lambda c: c.data == "invite_cancel")
+async def invite_cancel(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.edit_text("❌ Приглашение отменено.")
+    await state.clear()
+
+# Обработчики принятия/отклонения приглашения
+@router.callback_query(lambda c: c.data.startswith("invite_accept_"))
+async def invite_accept(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    invite_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        invite = await session.get(Invite, invite_id)
+        if not invite or invite.status != "pending":
+            await callback.message.edit_text("❌ Приглашение уже недействительно.")
+            return
+        if invite.invitee_id != user_id:
+            await callback.message.edit_text("❌ Это не ваше приглашение.")
+            return
+
+        invite.status = "accepted"
         await session.commit()
 
-        await message.bot.send_message(
+        inviter = await session.get(User, invite.inviter_id)
+        invitee = await session.get(User, invite.invitee_id)
+        if not inviter or not invitee:
+            await callback.message.edit_text("❌ Ошибка: пользователь не найден.")
+            return
+
+        # Преобразуем сложность в уровень
+        level_map = {"easy": "A1", "medium": "B1", "hard": "C1"}
+        level = level_map.get(invite.difficulty, "A1")
+
+        battle = await create_battle(session, inviter.id, level)
+        battle.player2_id = invitee.id
+        battle.status = "active"
+        await session.commit()
+
+        await callback.bot.send_message(
             inviter.telegram_id,
-            f"✅ Приглашение отправлено {invitee.first_name}! Битва создана."
+            f"✅ {invitee.first_name} принял приглашение! Битва начинается."
         )
-        await message.bot.send_message(
-            invitee.telegram_id,
-            f"🎮 Игрок {inviter.first_name} пригласил вас на бой! Битва началась."
+        await callback.message.edit_text("✅ Вы приняли приглашение! Битва начинается.")
+
+        await create_rounds_for_battle(session, battle.id, level, 10)
+        await start_round(callback, state, battle.id, session)
+
+        await state.clear()
+
+@router.callback_query(lambda c: c.data.startswith("invite_decline_"))
+async def invite_decline(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    invite_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        invite = await session.get(Invite, invite_id)
+        if not invite or invite.status != "pending":
+            await callback.message.edit_text("❌ Приглашение уже недействительно.")
+            return
+        if invite.invitee_id != user_id:
+            await callback.message.edit_text("❌ Это не ваше приглашение.")
+            return
+        invite.status = "declined"
+        await session.commit()
+
+        inviter = await session.get(User, invite.inviter_id)
+        if inviter:
+            await callback.bot.send_message(
+                inviter.telegram_id,
+                f"❌ {invitee.first_name} отклонил ваше приглашение."
+            )
+        await callback.message.edit_text("❌ Вы отклонили приглашение.")
+        await state.clear()
+
+# Обработчик запроса реванша (отправляет приглашение)
+@router.callback_query(lambda c: c.data.startswith("rematch_request_"))
+async def rematch_request(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = callback.data.split("_")
+    battle_id = int(data[2])
+    player_id = int(data[3])
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, player_id)
+        if not user or user.telegram_id != user_id:
+            await callback.message.edit_text("❌ Вы не можете запросить реванш за другого игрока.")
+            return
+
+        old_battle = await session.get(Battle, battle_id)
+        if not old_battle:
+            await callback.message.edit_text("❌ Битва не найдена.")
+            return
+
+        opponent_id = old_battle.player2_id if player_id == old_battle.player1_id else old_battle.player1_id
+        if not opponent_id:
+            await callback.message.edit_text("❌ Соперник не найден.")
+            return
+
+        opponent = await session.get(User, opponent_id)
+        if not opponent:
+            await callback.message.edit_text("❌ Соперник не найден.")
+            return
+
+        # Проверяем, есть ли у приглашаемого активная битва
+        existing_battle = await session.scalar(
+            select(Battle).where(
+                ((Battle.player1_id == opponent.id) | (Battle.player2_id == opponent.id)),
+                Battle.status.in_(["waiting", "active"])
+            )
         )
+        if existing_battle:
+            await callback.message.edit_text(f"❌ Игрок {opponent.first_name} уже участвует в битве.")
+            return
 
-        await create_rounds_for_battle(session, new_battle.id, level, 10)
-        await start_round(message, state, new_battle.id, session)
+        # Используем ту же сложность, что была в битве
+        difficulty = old_battle.difficulty  # A1, A2, ..., но нам нужно easy/medium/hard для отображения
+        # Обратное преобразование (упрощённо)
+        difficulty_map = {"A1": "easy", "A2": "easy", "B1": "medium", "B2": "medium", "C1": "hard", "C2": "hard"}
+        invite_difficulty = difficulty_map.get(difficulty, "medium")
 
+        # Создаём приглашение
+        invite = Invite(
+            inviter_id=user.id,
+            invitee_id=opponent.id,
+            difficulty=invite_difficulty,
+            status="pending"
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Принять", callback_data=f"invite_accept_{invite.id}")],
+                [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"invite_decline_{invite.id}")]
+            ]
+        )
+        await callback.bot.send_message(
+            opponent.telegram_id,
+            f"🔄 Игрок {user.first_name} хочет сыграть реванш! Сложность: {invite_difficulty}.\nПринять?",
+            reply_markup=keyboard
+        )
+        await callback.message.edit_text("✅ Запрос на реванш отправлен! Ожидайте ответа.")
         await state.clear()
 
 # ---------- Кнопка "Назад" ----------
