@@ -7,8 +7,8 @@ from bot.keyboards.reply import get_main_keyboard
 from bot.database import AsyncSessionLocal
 from bot.models import User, UserSettings, LearnedWord, StudyWord
 from bot.services.gigachat import generate_word
-from bot.handlers.battle import start_battle_search
 from bot.services.word_levels import get_level_by_elo
+from bot.handlers.battle import start_battle_search
 
 router = Router()
 
@@ -328,6 +328,60 @@ async def clear_study_list_callback(callback: types.CallbackQuery, state: FSMCon
         await session.commit()
         await callback.message.edit_text("✅ Список очищен.", reply_markup=get_back_keyboard())
 
+# ---------- Профиль ----------
+async def show_profile(message_or_callback):
+    if isinstance(message_or_callback, types.Message):
+        user_id = message_or_callback.from_user.id
+        answer_func = message_or_callback.answer
+        edit_func = None
+    else:
+        user_id = message_or_callback.from_user.id
+        answer_func = None
+        edit_func = message_or_callback.message.edit_text
+
+    async with AsyncSessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user:
+            text = "❌ Вы не зарегистрированы. Напишите /start."
+            if edit_func:
+                await edit_func(text)
+            else:
+                await answer_func(text)
+            return
+
+        level = get_level_by_elo(user.elo)
+
+        games = user.games_played
+        wins = user.wins
+        losses = user.losses
+        win_rate = round((wins / games * 100), 1) if games > 0 else 0
+
+        text = (
+            f"👤 *Профиль*\n\n"
+            f"Имя: {user.first_name or 'Не указано'}\n"
+            f"Рейтинг (ELO): *{user.elo}*\n"
+            f"Уровень: *{level}*\n\n"
+            f"📊 *Статистика боёв*\n"
+            f"Всего игр: *{games}*\n"
+            f"Побед: *{wins}*\n"
+            f"Поражений: *{losses}*\n"
+            f"Процент побед: *{win_rate}%*"
+        )
+
+        keyboard = get_back_keyboard()
+        if edit_func:
+            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+
+@router.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    await show_profile(message)
+
+@router.message(lambda message: message.text == "👤 Мой профиль")
+async def text_profile(message: types.Message):
+    await show_profile(message)
+
 # ---------- Основное меню ----------
 async def show_menu(message_or_callback):
     text = "📋 *Главное меню*\n\nВыберите раздел:"
@@ -359,6 +413,8 @@ async def process_menu_callback(callback: types.CallbackQuery, state: FSMContext
         await show_progress(callback)
     elif action == "study":
         await show_study_list(callback)
+    elif action == "profile":
+        await show_profile(callback)
     else:
         await callback.message.answer("Неизвестный раздел")
 
