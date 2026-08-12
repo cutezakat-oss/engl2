@@ -2,10 +2,10 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from bot.keyboards.reply import get_main_keyboard
 from bot.database import AsyncSessionLocal
-from bot.models import User, UserSettings, LearnedWord
+from bot.models import User, UserSettings, LearnedWord, StudyWord
 from bot.services.gigachat import generate_word
 from bot.handlers.battle import start_battle_search
 
@@ -73,7 +73,7 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
         if new_word:
             word_data = await generate_word(difficulty, exclude_list)
             await state.update_data(current_word=word_data["word"])
-            await state.update_data(current_word_data=word_data)  # сохраняем полные данные
+            await state.update_data(current_word_data=word_data)
         else:
             data = await state.get_data()
             word_data = data.get("current_word_data")
@@ -256,6 +256,71 @@ async def show_progress(message_or_callback):
         else:
             await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
 
+# ---------- Список для изучения ----------
+async def show_study_list(message_or_callback):
+    if isinstance(message_or_callback, types.Message):
+        user_id = message_or_callback.from_user.id
+        answer_func = message_or_callback.answer
+        edit_func = None
+    else:
+        user_id = message_or_callback.from_user.id
+        answer_func = None
+        edit_func = message_or_callback.message.edit_text
+
+    async with AsyncSessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user:
+            text = "❌ Вы не зарегистрированы. Напишите /start."
+            if edit_func:
+                await edit_func(text)
+            else:
+                await answer_func(text)
+            return
+
+        study_words = await session.scalars(
+            select(StudyWord).where(StudyWord.user_id == user.id)
+        )
+        words = list(study_words)
+
+        if not words:
+            text = "📚 *Список для изучения*\n\nУ вас пока нет слов в списке."
+        else:
+            text = "📚 *Список для изучения*\n\n"
+            for i, w in enumerate(words, 1):
+                text += f"{i}. *{w.word}* — {w.translation}\n"
+            text += "\nЧтобы удалить слово, нажмите на кнопку ниже."
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🗑 Очистить список", callback_data="clear_study_list")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+            ]
+        )
+        if edit_func:
+            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+
+@router.message(lambda message: message.text == "📚 Список для изучения")
+async def text_study_list(message: types.Message):
+    await show_study_list(message)
+
+@router.callback_query(lambda c: c.data == "clear_study_list")
+async def clear_study_list_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+    async with AsyncSessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user:
+            await callback.message.edit_text("❌ Пользователь не найден.")
+            return
+        await session.execute(
+            delete(StudyWord).where(StudyWord.user_id == user.id)
+        )
+        await session.commit()
+        await callback.message.edit_text("✅ Список очищен.", reply_markup=get_back_keyboard())
+
+# ---------- Основное меню ----------
 async def show_menu(message_or_callback):
     text = "📋 *Главное меню*\n\nВыберите раздел:"
     if isinstance(message_or_callback, types.Message):
@@ -284,6 +349,8 @@ async def process_menu_callback(callback: types.CallbackQuery, state: FSMContext
         await start_battle_search(callback.message, state)
     elif action == "progress":
         await show_progress(callback)
+    elif action == "study":
+        await show_study_list(callback)
     else:
         await callback.message.answer("Неизвестный раздел")
 
@@ -299,3 +366,5 @@ async def text_battle(message: types.Message, state: FSMContext):
 @router.message(lambda message: message.text == "📊 Мой прогресс")
 async def text_progress(message: types.Message):
     await show_progress(message)
+
+# Обработчик для "📚 Слова дня" уже есть выше
