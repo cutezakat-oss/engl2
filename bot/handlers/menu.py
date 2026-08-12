@@ -87,13 +87,20 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
             await state.update_data(current_word=word_data["word"])
             await state.update_data(current_word_data=word_data)
 
+        # Формируем текст с выделенным словом и переводом примера
+        example_text = word_data.get('example', '')
+        example_translation = word_data.get('example_translation', '')
+
         text = (
             f"📚 *Слово дня*\n\n"
             f"*{word_data['word']}*\n"
             f"_{word_data.get('transcription', '')}_\n\n"
             f"📖 {word_data['translation']}\n"
-            f"*Пример:* {word_data['example']}"
+            f"*Пример:* {example_text}\n"
         )
+        if example_translation:
+            text += f"*Перевод примера:* {example_translation}\n"
+
         keyboard = get_word_keyboard(word_data["word"])
 
         if edit_func:
