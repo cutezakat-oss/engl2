@@ -12,19 +12,8 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📊 Мой прогресс"),
             ],
             [
+                KeyboardButton(text="📚 Список для изучения"),
                 KeyboardButton(text="❌ Отменить поиск"),
-            ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
-
-def get_battle_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура, отображаемая во время активной битвы."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🚪 Выйти из боя"),
             ]
         ],
         resize_keyboard=True,
