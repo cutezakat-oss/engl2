@@ -1,3 +1,4 @@
+import os
 import asyncio
 from aiogram import Bot, Dispatcher
 from bot.config import BOT_TOKEN
@@ -10,6 +11,13 @@ from bot.handlers.reference import router as reference_router
 from bot.scheduler import start_scheduler
 from bot.models import Battle
 from sqlalchemy import delete
+
+# Создаём папку data с правами на запись (для SQLite)
+os.makedirs("data", exist_ok=True)
+try:
+    os.chmod("data", 0o777)
+except Exception:
+    pass  # если не получится, игнорируем
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
