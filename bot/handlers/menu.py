@@ -11,6 +11,7 @@ from bot.models import User, UserSettings, LearnedWord, StudyWord
 from bot.services.gigachat import generate_word
 from bot.handlers.battle import start_battle_search
 from bot.services.word_levels import get_level_by_elo
+from bot.states.battle import BattleStates
 
 router = Router()
 
@@ -90,7 +91,6 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
             await state.update_data(current_word=word_data["word"])
             await state.update_data(current_word_data=word_data)
 
-        # Экранирование
         word = html.escape(word_data["word"])
         transcription = html.escape(word_data.get("transcription", ""))
         translation = html.escape(word_data["translation"])
@@ -395,6 +395,20 @@ async def cmd_profile(message: types.Message):
 async def text_profile(message: types.Message):
     await show_profile(message)
 
+# ---------- Приглашение на бой (команда и кнопка) ----------
+@router.message(Command("invite"))
+async def cmd_invite(message: types.Message, state: FSMContext):
+    await message.answer(
+        "✏️ Введите @username пользователя, которого хотите пригласить на бой.\n"
+        "Пример: @john"
+    )
+    await state.set_state(BattleStates.waiting_for_invite)
+    await state.update_data(invite_type="direct")
+
+@router.message(lambda message: message.text == "👤 Пригласить на бой")
+async def text_invite(message: types.Message, state: FSMContext):
+    await cmd_invite(message, state)
+
 # ---------- Основное меню ----------
 async def show_menu(message_or_callback):
     text = "📋 *Главное меню*\n\nВыберите раздел:"
@@ -442,8 +456,4 @@ async def text_battle(message: types.Message, state: FSMContext):
 async def text_progress(message: types.Message):
     await show_progress(message)
 
-# ---------- Обработчик для кнопки "📖 Справочник" ----------
-@router.message(lambda message: message.text == "📖 Справочник")
-async def text_reference(message: types.Message):
-    from bot.handlers.reference import show_reference_menu
-    await show_reference_menu(message)
+# Обработчик для "📖 Справочник" находится в reference.py
