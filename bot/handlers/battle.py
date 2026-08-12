@@ -618,9 +618,10 @@ async def invite_friend_callback(callback: types.CallbackQuery, state: FSMContex
     await state.set_state(BattleStates.waiting_for_invite)
     await state.update_data(invite_type="direct")
 
-# Обработчик ввода @username (приглашение до боя или реванш)
+# ---------- ОБРАБОТЧИК ВВОДА @USERNAME (СОСТОЯНИЕ) ----------
 @router.message(BattleStates.waiting_for_invite)
 async def process_invite(message: types.Message, state: FSMContext):
+    logger.info(f"process_invite вызван для {message.from_user.id}, текст: {message.text}")
     user_id = message.from_user.id
     invite_text = message.text.strip()
     data = await state.get_data()
