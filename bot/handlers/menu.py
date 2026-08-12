@@ -1,5 +1,6 @@
 import html
 import re
+import logging
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,6 +13,8 @@ from bot.services.gigachat import generate_word
 from bot.handlers.battle import start_battle_search
 from bot.services.word_levels import get_level_by_elo
 from bot.states.battle import BattleStates
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -398,6 +401,7 @@ async def text_profile(message: types.Message):
 # ---------- Приглашение на бой (команда и кнопка) ----------
 @router.message(Command("invite"))
 async def cmd_invite(message: types.Message, state: FSMContext):
+    logger.info(f"Команда /invite от {message.from_user.id}")
     await message.answer(
         "✏️ Введите @username пользователя, которого хотите пригласить на бой.\n"
         "Пример: @john"
@@ -407,6 +411,7 @@ async def cmd_invite(message: types.Message, state: FSMContext):
 
 @router.message(lambda message: message.text == "👤 Пригласить на бой")
 async def text_invite(message: types.Message, state: FSMContext):
+    logger.info(f"Кнопка 'Пригласить' от {message.from_user.id}")
     await cmd_invite(message, state)
 
 # ---------- Основное меню ----------
@@ -456,4 +461,11 @@ async def text_battle(message: types.Message, state: FSMContext):
 async def text_progress(message: types.Message):
     await show_progress(message)
 
-# Обработчик для "📖 Справочник" находится в reference.py
+# ---------- Обработчик для кнопки "📖 Справочник" ----------
+@router.message(lambda message: message.text == "📖 Справочник")
+async def text_reference(message: types.Message):
+    logger.info(f"Кнопка 'Справочник' от {message.from_user.id}")
+    from bot.handlers.reference import show_reference_menu
+    await show_reference_menu(message)
+
+# Обработчик для "📚 Слова дня" удалён (кнопки больше нет)
