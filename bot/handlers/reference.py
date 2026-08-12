@@ -5,7 +5,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select
 from bot.database import AsyncSessionLocal
 from bot.models import User, LearnedWord
-from bot.handlers.menu import show_word  # импортируем функцию показа слова
+from bot.handlers.menu import show_word
 
 router = Router()
 
@@ -90,7 +90,7 @@ async def show_reference_menu(message_or_callback):
             [InlineKeyboardButton(text=data["name"], callback_data=f"ref_section_{key}")]
             for key, data in GRAMMAR_RULES.items()
         ] + [
-            [InlineKeyboardButton(text="🎲 Получить случайное слово", callback_data="ref_random_word")],  # новая кнопка
+            [InlineKeyboardButton(text="🎲 Получить случайное слово", callback_data="ref_random_word")],
             [InlineKeyboardButton(text="🔙 Назад в главное меню", callback_data="back_to_menu")]
         ]
     )
@@ -108,7 +108,6 @@ async def cmd_reference(message: types.Message):
 @router.callback_query(lambda c: c.data == "ref_random_word")
 async def ref_random_word(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    # Вызываем функцию show_word из menu.py, передавая callback и состояние
     await show_word(callback, state, new_word=True)
 
 # ---------- Показ подразделов внутри раздела ----------
@@ -224,6 +223,7 @@ async def ref_learn_word(callback: types.CallbackQuery, state: FSMContext):
         else:
             await callback.message.edit_text(f"ℹ️ Слово <b>{word}</b> уже выучено.", parse_mode="HTML")
 
+# ---------- ИСПРАВЛЕННЫЙ ОБРАБОТЧИК "Назад к правилу" ----------
 @router.callback_query(lambda c: c.data == "ref_back_to_rule")
 async def ref_back_to_rule(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -233,8 +233,39 @@ async def ref_back_to_rule(callback: types.CallbackQuery, state: FSMContext):
     if not section_key or not rule_key:
         await callback.message.edit_text("❌ Ошибка: не найдено текущее правило.")
         return
-    callback.data = f"ref_rule_{section_key}|{rule_key}"
-    await show_rule(callback, state)
+    
+    section_data = GRAMMAR_RULES.get(section_key)
+    if not section_data:
+        await callback.message.edit_text("❌ Раздел не найден.")
+        return
+    rule_data = section_data["sections"].get(rule_key)
+    if not rule_data:
+        await callback.message.edit_text("❌ Правило не найдено.")
+        return
+
+    text = f"📖 *{rule_data['name']}*\n\n{rule_data['text']}"
+
+    example_words = rule_data.get("example_words", [])
+    word_buttons = []
+    if example_words:
+        row = []
+        for word in example_words:
+            row.append(InlineKeyboardButton(text=word, callback_data=f"ref_word_{word}"))
+            if len(row) == 3:
+                word_buttons.append(row)
+                row = []
+        if row:
+            word_buttons.append(row)
+
+    nav_buttons = [
+        [InlineKeyboardButton(text="🔙 Назад к правилам", callback_data=f"ref_section_{section_key}")],
+        [InlineKeyboardButton(text="🔙 Назад в разделы", callback_data="ref_back_to_sections")]
+    ]
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=word_buttons + nav_buttons)
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    # Состояние уже содержит актуальные данные, ничего не меняем
 
 # ---------- Кнопка "Назад" из справочника ----------
 @router.callback_query(lambda c: c.data == "back_to_menu")
