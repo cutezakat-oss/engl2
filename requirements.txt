@@ -7,3 +7,4 @@ deep-translator
 aiohttp
 apscheduler
 google-genai
+translators
