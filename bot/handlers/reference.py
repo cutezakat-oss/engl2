@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select
 from bot.database import AsyncSessionLocal
 from bot.models import User, LearnedWord
+from bot.handlers.menu import show_word  # импортируем функцию показа слова
 
 router = Router()
 
@@ -89,10 +90,11 @@ async def show_reference_menu(message_or_callback):
             [InlineKeyboardButton(text=data["name"], callback_data=f"ref_section_{key}")]
             for key, data in GRAMMAR_RULES.items()
         ] + [
+            [InlineKeyboardButton(text="🎲 Получить случайное слово", callback_data="ref_random_word")],  # новая кнопка
             [InlineKeyboardButton(text="🔙 Назад в главное меню", callback_data="back_to_menu")]
         ]
     )
-    text = "📖 *Справочник по английской грамматике*\n\nВыберите раздел:"
+    text = "📖 *Справочник по английской грамматике*\n\nВыберите раздел или получите случайное слово:"
     if isinstance(message_or_callback, types.Message):
         await message_or_callback.answer(text, parse_mode="HTML", reply_markup=keyboard)
     else:
@@ -102,13 +104,18 @@ async def show_reference_menu(message_or_callback):
 async def cmd_reference(message: types.Message):
     await show_reference_menu(message)
 
-# Нет обработчика для текстовой кнопки "📖 Справочник" – он перенесён в menu.py
+# ---------- Обработчик кнопки "🎲 Получить случайное слово" ----------
+@router.callback_query(lambda c: c.data == "ref_random_word")
+async def ref_random_word(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    # Вызываем функцию show_word из menu.py, передавая callback и состояние
+    await show_word(callback, state, new_word=True)
 
 # ---------- Показ подразделов внутри раздела ----------
 @router.callback_query(lambda c: c.data.startswith("ref_section_"))
 async def show_section_menu(callback: types.CallbackQuery):
     await callback.answer()
-    section_key = callback.data.split("_")[2]
+    section_key = callback.data.split("_", 2)[2]
     section_data = GRAMMAR_RULES.get(section_key)
     if not section_data:
         await callback.message.edit_text("❌ Раздел не найден.")
@@ -116,7 +123,7 @@ async def show_section_menu(callback: types.CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=data["name"], callback_data=f"ref_rule_{section_key}_{subkey}")]
+            [InlineKeyboardButton(text=data["name"], callback_data=f"ref_rule_{section_key}|{subkey}")]
             for subkey, data in section_data["sections"].items()
         ] + [
             [InlineKeyboardButton(text="🔙 Назад к разделам", callback_data="ref_back_to_sections")]
@@ -137,9 +144,9 @@ async def back_to_sections(callback: types.CallbackQuery):
 @router.callback_query(lambda c: c.data.startswith("ref_rule_"))
 async def show_rule(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    parts = callback.data.split("_")
-    section_key = parts[2]
-    rule_key = parts[3]
+    data_part = callback.data.split("_", 2)[2]
+    section_key, rule_key = data_part.split("|", 1)
+    
     section_data = GRAMMAR_RULES.get(section_key)
     if not section_data:
         await callback.message.edit_text("❌ Раздел не найден.")
@@ -177,7 +184,7 @@ async def show_rule(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(lambda c: c.data.startswith("ref_word_"))
 async def handle_ref_word(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    word = callback.data.split("_")[2]
+    word = callback.data.split("_", 2)[2]
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -194,7 +201,7 @@ async def handle_ref_word(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(lambda c: c.data.startswith("ref_learn_"))
 async def ref_learn_word(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    word = callback.data.split("_")[2]
+    word = callback.data.split("_", 2)[2]
     user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
@@ -226,7 +233,7 @@ async def ref_back_to_rule(callback: types.CallbackQuery, state: FSMContext):
     if not section_key or not rule_key:
         await callback.message.edit_text("❌ Ошибка: не найдено текущее правило.")
         return
-    callback.data = f"ref_rule_{section_key}_{rule_key}"
+    callback.data = f"ref_rule_{section_key}|{rule_key}"
     await show_rule(callback, state)
 
 # ---------- Кнопка "Назад" из справочника ----------
