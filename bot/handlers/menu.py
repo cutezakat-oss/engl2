@@ -8,6 +8,7 @@ from bot.database import AsyncSessionLocal
 from bot.models import User, UserSettings, LearnedWord, StudyWord
 from bot.services.gigachat import generate_word
 from bot.handlers.battle import start_battle_search
+from bot.services.word_levels import get_level_by_elo
 
 router = Router()
 
