@@ -6,6 +6,7 @@ from bot.handlers.start import router as start_router
 from bot.handlers.menu import router as menu_router
 from bot.handlers.translate import router as translate_router
 from bot.handlers.battle import router as battle_router
+from bot.handlers.reference import router as reference_router
 from bot.scheduler import start_scheduler
 from bot.models import Battle
 from sqlalchemy import delete
@@ -17,6 +18,7 @@ dp.include_router(start_router)
 dp.include_router(menu_router)
 dp.include_router(translate_router)
 dp.include_router(battle_router)
+dp.include_router(reference_router)
 
 async def clear_stale_battles():
     async with AsyncSessionLocal() as session:
@@ -28,7 +30,7 @@ async def clear_stale_battles():
 
 async def main():
     await init_db()
-    await clear_stale_battles()   # только очистка висящих битв
+    await clear_stale_battles()
     print("Бот запущен!")
     start_scheduler(bot)
     await dp.start_polling(bot)
