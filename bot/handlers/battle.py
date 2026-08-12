@@ -177,7 +177,6 @@ async def start_battle_search(message: types.Message, state: FSMContext):
 
             level = get_level_by_elo(user.elo)
 
-            # Ищем битву с таким же уровнем
             waiting_battle = await find_waiting_battle(session, level)
 
             if waiting_battle:
@@ -515,6 +514,31 @@ async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, 
                 except Exception as e:
                     logger.error(f"Не удалось отправить предложение изучения игроку {player.telegram_id}: {e}")
 
+    # ---------- Кнопки реванша и приглашения ----------
+    for player_id in [battle.player1_id, battle.player2_id]:
+        player = await session.get(User, player_id)
+        if not player:
+            continue
+        opponent_id = battle.player2_id if player_id == battle.player1_id else battle.player1_id
+        opponent = await session.get(User, opponent_id) if opponent_id else None
+        if not opponent:
+            continue
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Реванш", callback_data=f"rematch_{battle.id}_{player_id}")],
+                [InlineKeyboardButton(text="👤 Пригласить друга", callback_data=f"invite_friend_{player_id}")]
+            ]
+        )
+        try:
+            await bot.send_message(
+                player.telegram_id,
+                "Хотите сыграть ещё раз или пригласить друга?",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить кнопки реванша/приглашения игроку {player.telegram_id}: {e}")
+
     await state.clear()
 
 # ---------- Обработчики кнопок добавления в список изучения ----------
@@ -575,6 +599,146 @@ async def add_study_all_callback(callback: types.CallbackQuery, state: FSMContex
 async def skip_study_callback(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("✅ Пропущено.")
+
+# ---------- Обработчики реванша и приглашения ----------
+@router.callback_query(lambda c: c.data.startswith("rematch_"))
+async def rematch_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = callback.data.split("_")
+    battle_id = int(data[1])
+    player_id = int(data[2])
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user or user.id != player_id:
+            await callback.message.edit_text("❌ Вы не можете запросить реванш за другого игрока.")
+            return
+
+        old_battle = await session.get(Battle, battle_id)
+        if not old_battle:
+            await callback.message.edit_text("❌ Битва не найдена.")
+            return
+
+        opponent_id = old_battle.player2_id if player_id == old_battle.player1_id else old_battle.player1_id
+        if not opponent_id:
+            await callback.message.edit_text("❌ Соперник не найден.")
+            return
+
+        opponent = await session.get(User, opponent_id)
+        if not opponent:
+            await callback.message.edit_text("❌ Соперник не найден.")
+            return
+
+        existing_battle = await session.scalar(
+            select(Battle).where(
+                ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
+                Battle.status.in_(["waiting", "active"])
+            )
+        )
+        if existing_battle:
+            await callback.message.edit_text("⚠️ У вас уже есть активная битва. Дождитесь её завершения.")
+            return
+
+        level = get_level_by_elo(user.elo)
+        new_battle = await create_battle(session, user.id, level)
+        new_battle.player2_id = opponent_id
+        new_battle.status = "active"
+        await session.commit()
+
+        await callback.bot.send_message(
+            user.telegram_id,
+            f"🔄 Реванш с {opponent.first_name} начат! Битва создана."
+        )
+        await callback.bot.send_message(
+            opponent.telegram_id,
+            f"🔄 Игрок {user.first_name} вызвал вас на реванш! Битва создана."
+        )
+
+        await create_rounds_for_battle(session, new_battle.id, level, 10)
+        await start_round(callback, state, new_battle.id, session)
+
+        await callback.message.edit_text("✅ Реванш создан! Битва начинается...")
+
+@router.callback_query(lambda c: c.data.startswith("invite_friend_"))
+async def invite_friend_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    player_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    if user_id != player_id:
+        await callback.message.edit_text("❌ Вы не можете приглашать за другого игрока.")
+        return
+
+    await callback.message.edit_text(
+        "✏️ Введите @username или ID пользователя, которого хотите пригласить на бой.\n"
+        "Пример: @john или 123456789"
+    )
+    await state.set_state(BattleStates.waiting_for_invite)
+    await state.update_data(inviter_id=user_id)
+
+@router.message(BattleStates.waiting_for_invite)
+async def process_invite(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    invite_text = message.text.strip()
+
+    async with AsyncSessionLocal() as session:
+        inviter = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not inviter:
+            await message.answer("❌ Вы не зарегистрированы.")
+            await state.clear()
+            return
+
+        if invite_text.startswith('@'):
+            username = invite_text[1:]
+            invitee = await session.scalar(select(User).where(User.username == username))
+        else:
+            try:
+                invitee_id = int(invite_text)
+                invitee = await session.scalar(select(User).where(User.telegram_id == invitee_id))
+            except ValueError:
+                await message.answer("❌ Некорректный формат. Введите @username или числовой ID.")
+                return
+
+        if not invitee:
+            await message.answer("❌ Пользователь не найден.")
+            return
+
+        if invitee.id == inviter.id:
+            await message.answer("❌ Нельзя пригласить самого себя.")
+            await state.clear()
+            return
+
+        existing_battle = await session.scalar(
+            select(Battle).where(
+                ((Battle.player1_id == invitee.id) | (Battle.player2_id == invitee.id)),
+                Battle.status.in_(["waiting", "active"])
+            )
+        )
+        if existing_battle:
+            await message.answer(f"❌ Игрок {invitee.first_name} уже участвует в битве.")
+            await state.clear()
+            return
+
+        level = get_level_by_elo(inviter.elo)
+        new_battle = await create_battle(session, inviter.id, level)
+        new_battle.player2_id = invitee.id
+        new_battle.status = "active"
+        await session.commit()
+
+        await message.bot.send_message(
+            inviter.telegram_id,
+            f"✅ Приглашение отправлено {invitee.first_name}! Битва создана."
+        )
+        await message.bot.send_message(
+            invitee.telegram_id,
+            f"🎮 Игрок {inviter.first_name} пригласил вас на бой! Битва началась."
+        )
+
+        await create_rounds_for_battle(session, new_battle.id, level, 10)
+        await start_round(message, state, new_battle.id, session)
+
+        await state.clear()
 
 # ---------- Кнопка "Назад" ----------
 @router.callback_query(lambda c: c.data == "back_to_menu")
