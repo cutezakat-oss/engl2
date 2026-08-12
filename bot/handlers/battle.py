@@ -5,9 +5,9 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from bot.database import AsyncSessionLocal
-from bot.models import User, Battle, BattleRound
+from bot.models import User, Battle, BattleRound, StudyWord
 from bot.services.battle_logic import create_battle, find_waiting_battle, join_battle, create_rounds_for_battle
 from bot.services.word_levels import get_level_by_elo
 from bot.states.battle import BattleStates
@@ -34,7 +34,6 @@ def get_cancel_keyboard():
     )
 
 def get_exit_keyboard():
-    """Клавиатура с кнопкой выхода из боя."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🚪 Выйти из боя", callback_data="exit_battle")]
@@ -97,7 +96,6 @@ async def cancel_search_callback(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
     await cancel_battle_search(callback.message, state)
 
-# ---------- Выход из боя ----------
 @router.callback_query(lambda c: c.data == "exit_battle")
 async def exit_battle_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -119,32 +117,26 @@ async def exit_battle_callback(callback: types.CallbackQuery, state: FSMContext)
             await callback.message.edit_text("❌ Нет активной битвы.")
             return
 
-        # Определяем соперника
         opponent_id = battle.player2_id if battle.player1_id == user.id else battle.player1_id
         if not opponent_id:
-            # Если соперник не найден (баг), завершаем битву с ничьей
             battle.status = "finished"
             battle.finished_at = func.now()
             await session.commit()
             await callback.message.edit_text("❌ Битва прервана (ошибка соперника).")
             return
 
-        # Победитель – соперник
         battle.winner_id = opponent_id
         battle.status = "finished"
         battle.finished_at = func.now()
-        # Обновляем счёт (победа соперника)
         if battle.player1_id == user.id:
-            battle.player2_score = 100  # условно, чтобы победил соперник
+            battle.player2_score = 100
         else:
             battle.player1_score = 100
         await session.commit()
         await session.refresh(battle)
 
-        # Обновляем ELO
         await update_elo(session, opponent_id, user.id)
 
-        # Уведомляем обоих игроков
         for pid in [battle.player1_id, battle.player2_id]:
             p = await session.get(User, pid)
             if p:
@@ -159,6 +151,65 @@ async def exit_battle_callback(callback: types.CallbackQuery, state: FSMContext)
 
         await state.clear()
         await callback.message.edit_text("✅ Вы вышли из боя.")
+
+# ---------- Обработчик добавления неправильных слов в список изучения ----------
+@router.callback_query(lambda c: c.data.startswith("add_study_all_"))
+async def add_study_all_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = callback.data.split("_")
+    battle_id = int(data[3])
+    player_id = int(data[4])
+
+    async with AsyncSessionLocal() as session:
+        battle = await session.get(Battle, battle_id)
+        if not battle:
+            await callback.message.edit_text("❌ Битва не найдена.")
+            return
+
+        user_id = callback.from_user.id
+        if user_id != battle.player1_id and user_id != battle.player2_id:
+            await callback.message.edit_text("❌ Вы не участник этой битвы.")
+            return
+
+        rounds = await session.scalars(
+            select(BattleRound).where(BattleRound.battle_id == battle_id)
+        )
+        wrong_words = []
+        for r in rounds:
+            if player_id == battle.player1_id:
+                answer = r.player1_answer
+            else:
+                answer = r.player2_answer
+            if answer and answer.lower().strip() != r.correct_answer.lower().strip():
+                wrong_words.append({"word": r.word, "translation": r.correct_answer})
+
+        user = await session.get(User, user_id)
+        if not user:
+            await callback.message.edit_text("❌ Пользователь не найден.")
+            return
+
+        added_count = 0
+        for w in wrong_words:
+            existing = await session.scalar(
+                select(StudyWord).where(
+                    StudyWord.user_id == user.id,
+                    StudyWord.word == w["word"]
+                )
+            )
+            if not existing:
+                study = StudyWord(user_id=user.id, word=w["word"], translation=w["translation"])
+                session.add(study)
+                added_count += 1
+        await session.commit()
+
+        await callback.message.edit_text(
+            f"✅ Добавлено {added_count} слов в список для изучения."
+        )
+
+@router.callback_query(lambda c: c.data == "skip_study")
+async def skip_study_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text("✅ Пропущено.")
 
 # ---------- Основная логика поиска соперника ----------
 async def start_battle_search(message: types.Message, state: FSMContext):
@@ -267,7 +318,6 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
 
         question_text = f"📝 *Вопрос {round_obj.round_number}/{battle.rounds_total}*\n\nПереведите слово:\n*{round_obj.word}*"
 
-        # Отправляем вопрос каждому игроку с кнопкой выхода
         for player_id in [battle.player1_id, battle.player2_id]:
             player = await session.get(User, player_id)
             if player:
@@ -276,17 +326,15 @@ async def start_round(message_or_callback, state: FSMContext, battle_id: int, se
                         player.telegram_id,
                         question_text,
                         parse_mode="Markdown",
-                        reply_markup=get_exit_keyboard()  # <-- Добавляем кнопку выхода
+                        reply_markup=get_exit_keyboard()
                     )
                     logger.info(f"Вопрос отправлен игроку {player.telegram_id}")
                 except Exception as e:
                     logger.error(f"Не удалось отправить вопрос игроку {player.telegram_id}: {e}")
 
-        # Сохраняем в FSM id раунда и время начала
         await state.update_data(current_round_id=round_obj.id)
         await state.update_data(round_start_time=asyncio.get_event_loop().time())
 
-        # Устанавливаем таймаут (10 секунд) – запускаем фоновую задачу
         asyncio.create_task(timeout_round(message_or_callback, state, battle_id, round_obj.id, session))
     except Exception as e:
         logger.error(f"Ошибка в start_round: {e}", exc_info=True)
@@ -302,7 +350,6 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
         bot = message_or_callback.bot
 
     try:
-        # Проверяем, не завершился ли раунд уже (оба ответили)
         round_obj = await session.get(BattleRound, round_id)
         if not round_obj:
             return
@@ -312,19 +359,16 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
         if not battle or battle.status != "active":
             return
 
-        # Если один ответил, очко ему, иначе ничья
         if round_obj.player1_answer is None and round_obj.player2_answer is not None:
             battle.player2_score += 1
         elif round_obj.player2_answer is None and round_obj.player1_answer is not None:
             battle.player1_score += 1
         else:
-            # никто не ответил
             pass
 
         battle.current_round += 1
         await session.commit()
 
-        # Уведомляем игроков
         for player_id in [battle.player1_id, battle.player2_id]:
             player = await session.get(User, player_id)
             if player:
@@ -332,20 +376,18 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
                     await bot.send_message(
                         player.telegram_id,
                         "⏰ Время вышло! Переходим к следующему вопросу.",
-                        reply_markup=get_exit_keyboard()  # сохраняем кнопку выхода
+                        reply_markup=get_exit_keyboard()
                     )
                 except Exception:
                     pass
 
-        # Переходим к следующему раунду
         await start_round(message_or_callback, state, battle_id, session)
     except Exception as e:
         logger.error(f"Ошибка в timeout_round: {e}", exc_info=True)
 
-# ---------- Обработчик текстовых ответов (без FSM) ----------
+# ---------- Обработчик текстовых ответов ----------
 @router.message()
 async def handle_answer(message: types.Message, state: FSMContext):
-    # Игнорируем команды и сообщения, начинающиеся с '/'
     if message.text.startswith('/'):
         return
 
@@ -354,7 +396,6 @@ async def handle_answer(message: types.Message, state: FSMContext):
     if not text:
         return
 
-    # Проверяем, есть ли у пользователя активная битва
     async with AsyncSessionLocal() as session:
         try:
             user = await session.scalar(select(User).where(User.telegram_id == user_id))
@@ -370,7 +411,6 @@ async def handle_answer(message: types.Message, state: FSMContext):
             if not battle:
                 return
 
-            # Находим текущий раунд (который ещё не завершён)
             round_obj = await session.scalar(
                 select(BattleRound).where(
                     BattleRound.battle_id == battle.id,
@@ -380,7 +420,6 @@ async def handle_answer(message: types.Message, state: FSMContext):
             if not round_obj:
                 return
 
-            # Проверяем, не ответил ли уже этот игрок
             if battle.player1_id == user.id and round_obj.player1_answer is not None:
                 await message.answer("Вы уже ответили на этот вопрос.")
                 return
@@ -388,7 +427,6 @@ async def handle_answer(message: types.Message, state: FSMContext):
                 await message.answer("Вы уже ответили на этот вопрос.")
                 return
 
-            # Сохраняем ответ
             if battle.player1_id == user.id:
                 round_obj.player1_answer = text
                 round_obj.player1_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
@@ -400,9 +438,7 @@ async def handle_answer(message: types.Message, state: FSMContext):
 
             await session.commit()
 
-            # Проверяем, ответили ли оба
             if round_obj.player1_answer is not None and round_obj.player2_answer is not None:
-                # Обрабатываем результат раунда
                 correct = round_obj.correct_answer.lower().strip()
                 p1_correct = round_obj.player1_answer.lower().strip() == correct
                 p2_correct = round_obj.player2_answer.lower().strip() == correct
@@ -421,13 +457,11 @@ async def handle_answer(message: types.Message, state: FSMContext):
                         round_obj.winner_id = battle.player2_id
                         battle.player2_score += 1
                 else:
-                    # никто не прав
                     pass
 
                 battle.current_round += 1
                 await session.commit()
 
-                # Отправляем результат раунда
                 result_text = f"🏆 *Результат раунда {round_obj.round_number}*\n"
                 result_text += f"Игрок1: {'✅' if p1_correct else '❌'} ({round_obj.player1_time:.1f}с)\n"
                 result_text += f"Игрок2: {'✅' if p2_correct else '❌'} ({round_obj.player2_time:.1f}с)\n"
@@ -445,19 +479,17 @@ async def handle_answer(message: types.Message, state: FSMContext):
                         except Exception:
                             pass
 
-                # Переходим к следующему раунду или завершаем битву
                 if battle.current_round >= battle.rounds_total:
                     await finish_battle(message, state, battle, session)
                 else:
                     await start_round(message, state, battle.id, session)
             else:
-                # Ждём ответа второго игрока
                 await message.answer("⏳ Ожидаем ответа соперника...")
         except Exception as e:
             logger.error(f"Ошибка в handle_answer: {e}", exc_info=True)
             await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
-# ---------- Завершение битвы ----------
+# ---------- Завершение битвы и отправка предложения изучить слова ----------
 async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, session):
     battle.status = "finished"
     battle.finished_at = func.now()
@@ -503,6 +535,46 @@ async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, 
                 )
             except Exception:
                 pass
+
+    # -------- Сбор неправильных слов и предложение изучить --------
+    rounds = await session.scalars(
+        select(BattleRound).where(BattleRound.battle_id == battle.id)
+    )
+    rounds_list = list(rounds)
+
+    for player_id in [battle.player1_id, battle.player2_id]:
+        wrong_words = []
+        for r in rounds_list:
+            if player_id == battle.player1_id:
+                answer = r.player1_answer
+            else:
+                answer = r.player2_answer
+            if answer and answer.lower().strip() != r.correct_answer.lower().strip():
+                wrong_words.append({"word": r.word, "translation": r.correct_answer})
+        
+        if wrong_words:
+            player = await session.get(User, player_id)
+            if player:
+                text = "📚 *Слова, которые вы не угадали:*\n\n"
+                for i, w in enumerate(wrong_words, 1):
+                    text += f"{i}. *{w['word']}* — {w['translation']}\n"
+                text += "\nХотите добавить их в список для изучения?"
+                
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="✅ Добавить все", callback_data=f"add_study_all_{battle.id}_{player_id}")],
+                        [InlineKeyboardButton(text="❌ Пропустить", callback_data="skip_study")]
+                    ]
+                )
+                try:
+                    await bot.send_message(
+                        player.telegram_id,
+                        text,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить предложение изучения игроку {player.telegram_id}: {e}")
 
     await state.clear()
 
