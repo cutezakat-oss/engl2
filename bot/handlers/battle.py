@@ -2,7 +2,7 @@ import json
 import asyncio
 import logging
 from aiogram import Router, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func
@@ -328,9 +328,10 @@ async def timeout_round(message_or_callback, state: FSMContext, battle_id: int, 
     except Exception as e:
         logger.error(f"Ошибка в timeout_round: {e}", exc_info=True)
 
-# ---------- Обработчик текстовых ответов ----------
+# ---------- ОБРАБОТЧИК ТЕКСТОВЫХ ОТВЕТОВ (ТОЛЬКО ДЛЯ АКТИВНОЙ БИТВЫ) ----------
 @router.message()
 async def handle_answer(message: types.Message, state: FSMContext):
+    # Игнорируем команды
     if message.text.startswith('/'):
         return
 
@@ -339,98 +340,97 @@ async def handle_answer(message: types.Message, state: FSMContext):
     if not text:
         return
 
+    # Проверяем, есть ли у пользователя активная битва
     async with AsyncSessionLocal() as session:
-        try:
-            user = await session.scalar(select(User).where(User.telegram_id == user_id))
-            if not user:
-                return
+        user = await session.scalar(select(User).where(User.telegram_id == user_id))
+        if not user:
+            return
 
-            battle = await session.scalar(
-                select(Battle).where(
-                    ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
-                    Battle.status == "active"
-                )
+        battle = await session.scalar(
+            select(Battle).where(
+                ((Battle.player1_id == user.id) | (Battle.player2_id == user.id)),
+                Battle.status == "active"
             )
-            if not battle:
-                return
+        )
+        # Если нет активной битвы, выходим (это сообщение не для нас)
+        if not battle:
+            return
 
-            round_obj = await session.scalar(
-                select(BattleRound).where(
-                    BattleRound.battle_id == battle.id,
-                    BattleRound.round_number == battle.current_round + 1
-                )
+        # Находим текущий раунд
+        round_obj = await session.scalar(
+            select(BattleRound).where(
+                BattleRound.battle_id == battle.id,
+                BattleRound.round_number == battle.current_round + 1
             )
-            if not round_obj:
-                return
+        )
+        if not round_obj:
+            return
 
-            if battle.player1_id == user.id and round_obj.player1_answer is not None:
-                await message.answer("Вы уже ответили на этот вопрос.")
-                return
-            if battle.player2_id == user.id and round_obj.player2_answer is not None:
-                await message.answer("Вы уже ответили на этот вопрос.")
-                return
+        if battle.player1_id == user.id and round_obj.player1_answer is not None:
+            await message.answer("Вы уже ответили на этот вопрос.")
+            return
+        if battle.player2_id == user.id and round_obj.player2_answer is not None:
+            await message.answer("Вы уже ответили на этот вопрос.")
+            return
 
-            if battle.player1_id == user.id:
-                round_obj.player1_answer = text
-                round_obj.player1_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
-            elif battle.player2_id == user.id:
-                round_obj.player2_answer = text
-                round_obj.player2_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
-            else:
-                return
+        if battle.player1_id == user.id:
+            round_obj.player1_answer = text
+            round_obj.player1_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
+        elif battle.player2_id == user.id:
+            round_obj.player2_answer = text
+            round_obj.player2_time = asyncio.get_event_loop().time() - (await state.get_data()).get("round_start_time", 0)
+        else:
+            return
 
-            await session.commit()
+        await session.commit()
 
-            if round_obj.player1_answer is not None and round_obj.player2_answer is not None:
-                correct = round_obj.correct_answer.lower().strip()
-                p1_correct = round_obj.player1_answer.lower().strip() == correct
-                p2_correct = round_obj.player2_answer.lower().strip() == correct
+        if round_obj.player1_answer is not None and round_obj.player2_answer is not None:
+            correct = round_obj.correct_answer.lower().strip()
+            p1_correct = round_obj.player1_answer.lower().strip() == correct
+            p2_correct = round_obj.player2_answer.lower().strip() == correct
 
-                if p1_correct and not p2_correct:
+            if p1_correct and not p2_correct:
+                round_obj.winner_id = battle.player1_id
+                battle.player1_score += 1
+            elif p2_correct and not p1_correct:
+                round_obj.winner_id = battle.player2_id
+                battle.player2_score += 1
+            elif p1_correct and p2_correct:
+                if round_obj.player1_time < round_obj.player2_time:
                     round_obj.winner_id = battle.player1_id
                     battle.player1_score += 1
-                elif p2_correct and not p1_correct:
+                else:
                     round_obj.winner_id = battle.player2_id
                     battle.player2_score += 1
-                elif p1_correct and p2_correct:
-                    if round_obj.player1_time < round_obj.player2_time:
-                        round_obj.winner_id = battle.player1_id
-                        battle.player1_score += 1
-                    else:
-                        round_obj.winner_id = battle.player2_id
-                        battle.player2_score += 1
-                else:
-                    pass
-
-                battle.current_round += 1
-                await session.commit()
-
-                result_text = f"🏆 *Результат раунда {round_obj.round_number}*\n"
-                result_text += f"Игрок1: {'✅' if p1_correct else '❌'} ({round_obj.player1_time:.1f}с)\n"
-                result_text += f"Игрок2: {'✅' if p2_correct else '❌'} ({round_obj.player2_time:.1f}с)\n"
-                if round_obj.winner_id:
-                    winner = await session.get(User, round_obj.winner_id)
-                    result_text += f"Победитель раунда: {winner.first_name} 🎉"
-                else:
-                    result_text += "Ничья!"
-
-                for pid in [battle.player1_id, battle.player2_id]:
-                    p = await session.get(User, pid)
-                    if p:
-                        try:
-                            await message.bot.send_message(p.telegram_id, result_text, parse_mode="Markdown")
-                        except Exception:
-                            pass
-
-                if battle.current_round >= battle.rounds_total:
-                    await finish_battle(message, state, battle, session, message.bot)
-                else:
-                    await start_round(message, state, battle.id, session)
             else:
-                await message.answer("⏳ Ожидаем ответа соперника...")
-        except Exception as e:
-            logger.error(f"Ошибка в handle_answer: {e}", exc_info=True)
-            await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+                pass
+
+            battle.current_round += 1
+            await session.commit()
+
+            result_text = f"🏆 *Результат раунда {round_obj.round_number}*\n"
+            result_text += f"Игрок1: {'✅' if p1_correct else '❌'} ({round_obj.player1_time:.1f}с)\n"
+            result_text += f"Игрок2: {'✅' if p2_correct else '❌'} ({round_obj.player2_time:.1f}с)\n"
+            if round_obj.winner_id:
+                winner = await session.get(User, round_obj.winner_id)
+                result_text += f"Победитель раунда: {winner.first_name} 🎉"
+            else:
+                result_text += "Ничья!"
+
+            for pid in [battle.player1_id, battle.player2_id]:
+                p = await session.get(User, pid)
+                if p:
+                    try:
+                        await message.bot.send_message(p.telegram_id, result_text, parse_mode="Markdown")
+                    except Exception:
+                        pass
+
+            if battle.current_round >= battle.rounds_total:
+                await finish_battle(message, state, battle, session, message.bot)
+            else:
+                await start_round(message, state, battle.id, session)
+        else:
+            await message.answer("⏳ Ожидаем ответа соперника...")
 
 # ---------- Завершение битвы ----------
 async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, session, bot):
@@ -619,7 +619,7 @@ async def invite_friend_callback(callback: types.CallbackQuery, state: FSMContex
     await state.update_data(invite_type="direct")
 
 # ---------- ОБРАБОТЧИК ВВОДА @USERNAME (СОСТОЯНИЕ) ----------
-@router.message(BattleStates.waiting_for_invite)
+@router.message(StateFilter(BattleStates.waiting_for_invite))
 async def process_invite(message: types.Message, state: FSMContext):
     logger.info(f"process_invite вызван для {message.from_user.id}, текст: {message.text}")
     user_id = message.from_user.id
