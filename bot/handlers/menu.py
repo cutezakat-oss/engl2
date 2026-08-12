@@ -90,19 +90,14 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
             await state.update_data(current_word=word_data["word"])
             await state.update_data(current_word_data=word_data)
 
-        # Экранируем все тексты для HTML
+        # Экранирование
         word = html.escape(word_data["word"])
         transcription = html.escape(word_data.get("transcription", ""))
         translation = html.escape(word_data["translation"])
         example_raw = word_data.get("example", "")
         example_translation_raw = word_data.get("example_translation", "")
 
-        # Выделяем слово в примере жирным (заменяем первое вхождение целого слова)
         if example_raw:
-            # Ищем границы слова (слово может быть с апострофом или дефисом, но для простоты используем границы \b)
-            # Чтобы не сломать HTML, сначала экранируем пример, но это сломает замену,
-            # поэтому экранируем после замены
-            # Сначала заменяем, потом экранируем
             pattern = re.compile(r'\b' + re.escape(word_data["word"]) + r'\b', re.IGNORECASE)
             example = pattern.sub(f'<b>{word_data["word"]}</b>', example_raw)
             example = html.escape(example)
@@ -127,18 +122,14 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
             text += f"📝 <i>Перевод примера:</i> {example_translation}\n"
 
         keyboard = get_word_keyboard(word_data["word"])
-
         if edit_func:
             await edit_func(text, parse_mode="HTML", reply_markup=keyboard)
         else:
             await answer_func(text, parse_mode="HTML", reply_markup=keyboard)
 
-# Команда /words (доступна всегда)
 @router.message(Command("words"))
 async def cmd_words(message: types.Message, state: FSMContext):
     await show_word(message, state, new_word=True)
-
-# Обработчик для текстовой кнопки «Слова дня» УДАЛЁН (кнопки больше нет в меню)
 
 @router.callback_query(lambda c: c.data == "next_word")
 async def next_word_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -451,4 +442,8 @@ async def text_battle(message: types.Message, state: FSMContext):
 async def text_progress(message: types.Message):
     await show_progress(message)
 
-# Обработчик для "📖 Справочник" находится в reference.py
+# ---------- Обработчик для кнопки "📖 Справочник" ----------
+@router.message(lambda message: message.text == "📖 Справочник")
+async def text_reference(message: types.Message):
+    from bot.handlers.reference import show_reference_menu
+    await show_reference_menu(message)
