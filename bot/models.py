@@ -13,15 +13,14 @@ class User(Base):
     first_name: Mapped[str] = mapped_column(String(255), nullable=True)
     created_at = mapped_column(DateTime, server_default=func.now())
 
-    # Новые поля для ELO
     elo: Mapped[int] = mapped_column(Integer, default=300)
     wins: Mapped[int] = mapped_column(Integer, default=0)
     losses: Mapped[int] = mapped_column(Integer, default=0)
     games_played: Mapped[int] = mapped_column(Integer, default=0)
 
-    # Связи с другими таблицами
     settings: Mapped["UserSettings"] = relationship(back_populates="user", uselist=False)
     learned_words: Mapped[list["LearnedWord"]] = relationship(back_populates="user")
+    study_words: Mapped[list["StudyWord"]] = relationship(back_populates="user")
 
     battles_as_player1: Mapped[list["Battle"]] = relationship(
         foreign_keys="Battle.player1_id",
@@ -51,6 +50,17 @@ class LearnedWord(Base):
 
     user: Mapped["User"] = relationship(back_populates="learned_words")
 
+class StudyWord(Base):
+    __tablename__ = "study_words"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    word: Mapped[str] = mapped_column(String(100), nullable=False)
+    translation: Mapped[str] = mapped_column(String(100), nullable=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="study_words")
+
 # ---------- PvP модели ----------
 class Battle(Base):
     __tablename__ = "battles"
@@ -64,7 +74,7 @@ class Battle(Base):
     current_round: Mapped[int] = mapped_column(Integer, default=0)
     player1_score: Mapped[int] = mapped_column(Integer, default=0)
     player2_score: Mapped[int] = mapped_column(Integer, default=0)
-    difficulty: Mapped[str] = mapped_column(String(20), default="medium")  # теперь уровень (A1, A2, ...)
+    difficulty: Mapped[str] = mapped_column(String(20), default="medium")  # уровень (A1, A2, ...)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
