@@ -12,7 +12,10 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📊 Мой прогресс"),
             ],
             [
+                KeyboardButton(text="👤 Мой профиль"),
                 KeyboardButton(text="📚 Список для изучения"),
+            ],
+            [
                 KeyboardButton(text="❌ Отменить поиск"),
             ]
         ],
