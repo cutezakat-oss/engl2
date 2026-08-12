@@ -1,10 +1,10 @@
 import os
+import translators as ts
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.states.translate import TranslateStates
-from deep_translator import GoogleTranslator
 from langdetect import detect, DetectorFactory
 
 DetectorFactory.seed = 0
@@ -37,10 +37,18 @@ async def handle_translate_text(message: types.Message, state: FSMContext):
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     try:
+        # Определяем язык текста
         detected_lang = detect(user_text)
+        # Если русский -> переводим на английский, иначе на русский
         target_lang = 'ru' if detected_lang == 'en' else 'en'
-        translator = GoogleTranslator(source='auto', target=target_lang)
-        translated = translator.translate(user_text)
+
+        # Используем translators (библиотека более стабильная)
+        translated = ts.translate_text(
+            user_text,
+            translator='google',
+            from_language='auto',
+            to_language=target_lang
+        )
 
         result_text = (
             f"🔄 *Перевод*\n\n"
