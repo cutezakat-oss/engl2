@@ -102,9 +102,7 @@ async def show_reference_menu(message_or_callback):
 async def cmd_reference(message: types.Message):
     await show_reference_menu(message)
 
-@router.message(lambda message: message.text == "📖 Справочник")
-async def text_reference(message: types.Message):
-    await show_reference_menu(message)
+# Нет обработчика для текстовой кнопки "📖 Справочник" – он перенесён в menu.py
 
 # ---------- Показ подразделов внутри раздела ----------
 @router.callback_query(lambda c: c.data.startswith("ref_section_"))
