@@ -1,3 +1,5 @@
+import html
+import re
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -7,8 +9,8 @@ from bot.keyboards.reply import get_main_keyboard
 from bot.database import AsyncSessionLocal
 from bot.models import User, UserSettings, LearnedWord, StudyWord
 from bot.services.gigachat import generate_word
-from bot.services.word_levels import get_level_by_elo
 from bot.handlers.battle import start_battle_search
+from bot.services.word_levels import get_level_by_elo
 
 router = Router()
 
@@ -88,34 +90,55 @@ async def show_word(message_or_callback, state: FSMContext, new_word: bool = Tru
             await state.update_data(current_word=word_data["word"])
             await state.update_data(current_word_data=word_data)
 
-        # Формируем текст с выделенным словом и переводом примера
-        example_text = word_data.get('example', '')
-        example_translation = word_data.get('example_translation', '')
+        # Экранируем все тексты для HTML
+        word = html.escape(word_data["word"])
+        transcription = html.escape(word_data.get("transcription", ""))
+        translation = html.escape(word_data["translation"])
+        example_raw = word_data.get("example", "")
+        example_translation_raw = word_data.get("example_translation", "")
 
-        text = (
-            f"📚 *Слово дня*\n\n"
-            f"*{word_data['word']}*\n"
-            f"_{word_data.get('transcription', '')}_\n\n"
-            f"📖 {word_data['translation']}\n"
-            f"*Пример:* {example_text}\n"
-        )
+        # Выделяем слово в примере жирным (заменяем первое вхождение целого слова)
+        if example_raw:
+            # Ищем границы слова (слово может быть с апострофом или дефисом, но для простоты используем границы \b)
+            # Чтобы не сломать HTML, сначала экранируем пример, но это сломает замену,
+            # поэтому экранируем после замены
+            # Сначала заменяем, потом экранируем
+            pattern = re.compile(r'\b' + re.escape(word_data["word"]) + r'\b', re.IGNORECASE)
+            example = pattern.sub(f'<b>{word_data["word"]}</b>', example_raw)
+            example = html.escape(example)
+        else:
+            example = ""
+
+        if example_translation_raw:
+            example_translation = html.escape(example_translation_raw)
+        else:
+            example_translation = ""
+
+        text = f"📚 *Слово дня*\n\n"
+        text += f"<b>{word}</b>\n"
+        if transcription:
+            text += f"<i>{transcription}</i>\n\n"
+        else:
+            text += "\n"
+        text += f"📖 {translation}\n"
+        if example:
+            text += f"📝 <i>Пример:</i> {example}\n"
         if example_translation:
-            text += f"*Перевод примера:* {example_translation}\n"
+            text += f"📝 <i>Перевод примера:</i> {example_translation}\n"
 
         keyboard = get_word_keyboard(word_data["word"])
 
         if edit_func:
-            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await edit_func(text, parse_mode="HTML", reply_markup=keyboard)
         else:
-            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await answer_func(text, parse_mode="HTML", reply_markup=keyboard)
 
+# Команда /words (доступна всегда)
 @router.message(Command("words"))
 async def cmd_words(message: types.Message, state: FSMContext):
     await show_word(message, state, new_word=True)
 
-@router.message(lambda message: message.text == "📚 Слова дня")
-async def text_words(message: types.Message, state: FSMContext):
-    await show_word(message, state, new_word=True)
+# Обработчик для текстовой кнопки «Слова дня» УДАЛЁН (кнопки больше нет в меню)
 
 @router.callback_query(lambda c: c.data == "next_word")
 async def next_word_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -149,11 +172,11 @@ async def learn_word_callback(callback: types.CallbackQuery, state: FSMContext):
             session.add(learned)
             await session.commit()
             await callback.message.edit_text(
-                f"✅ Слово *{word}*" + (f" — {translation}" if translation else "") + " добавлено в выученные!",
-                parse_mode="Markdown"
+                f"✅ Слово <b>{word}</b>" + (f" — {translation}" if translation else "") + " добавлено в выученные!",
+                parse_mode="HTML"
             )
         else:
-            await callback.message.edit_text(f"ℹ️ Слово *{word}* уже было выучено.", parse_mode="Markdown")
+            await callback.message.edit_text(f"ℹ️ Слово <b>{word}</b> уже было выучено.", parse_mode="HTML")
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -176,7 +199,7 @@ async def settings_callback(callback: types.CallbackQuery):
     )
     await callback.message.edit_text(
         "⚙️ *Настройки сложности*\n\nВыбери уровень слов:",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=keyboard
     )
 
@@ -196,8 +219,8 @@ async def set_difficulty_callback(callback: types.CallbackQuery):
         await session.commit()
 
     await callback.message.edit_text(
-        f"✅ Сложность изменена на *{difficulty}*.",
-        parse_mode="Markdown",
+        f"✅ Сложность изменена на <b>{difficulty}</b>.",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]]
         )
@@ -213,9 +236,9 @@ async def back_to_menu_callback(callback: types.CallbackQuery, state: FSMContext
 async def show_translate(message_or_callback):
     text = "🔤 *Переводчик*\n\nНажми на кнопку «Переводчик» в меню, чтобы начать."
     if isinstance(message_or_callback, types.Message):
-        await message_or_callback.answer(text, parse_mode="Markdown", reply_markup=get_back_keyboard())
+        await message_or_callback.answer(text, parse_mode="HTML", reply_markup=get_back_keyboard())
     else:
-        await message_or_callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_back_keyboard())
+        await message_or_callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_back_keyboard())
 
 async def show_progress(message_or_callback):
     if isinstance(message_or_callback, types.Message):
@@ -260,9 +283,9 @@ async def show_progress(message_or_callback):
 
         keyboard = get_back_keyboard()
         if edit_func:
-            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await edit_func(text, parse_mode="HTML", reply_markup=keyboard)
         else:
-            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await answer_func(text, parse_mode="HTML", reply_markup=keyboard)
 
 # ---------- Список для изучения ----------
 async def show_study_list(message_or_callback):
@@ -295,7 +318,7 @@ async def show_study_list(message_or_callback):
         else:
             text = "📚 *Список для изучения*\n\n"
             for i, w in enumerate(words, 1):
-                text += f"{i}. *{w.word}* — {w.translation}\n"
+                text += f"{i}. <b>{w.word}</b> — {w.translation}\n"
             text += "\nЧтобы удалить слово, нажмите на кнопку ниже."
 
         keyboard = InlineKeyboardMarkup(
@@ -305,9 +328,9 @@ async def show_study_list(message_or_callback):
             ]
         )
         if edit_func:
-            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await edit_func(text, parse_mode="HTML", reply_markup=keyboard)
         else:
-            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await answer_func(text, parse_mode="HTML", reply_markup=keyboard)
 
 @router.message(lambda message: message.text == "📚 Список для изучения")
 async def text_study_list(message: types.Message):
@@ -350,7 +373,6 @@ async def show_profile(message_or_callback):
             return
 
         level = get_level_by_elo(user.elo)
-
         games = user.games_played
         wins = user.wins
         losses = user.losses
@@ -359,20 +381,20 @@ async def show_profile(message_or_callback):
         text = (
             f"👤 *Профиль*\n\n"
             f"Имя: {user.first_name or 'Не указано'}\n"
-            f"Рейтинг (ELO): *{user.elo}*\n"
-            f"Уровень: *{level}*\n\n"
+            f"Рейтинг (ELO): <b>{user.elo}</b>\n"
+            f"Уровень: <b>{level}</b>\n\n"
             f"📊 *Статистика боёв*\n"
-            f"Всего игр: *{games}*\n"
-            f"Побед: *{wins}*\n"
-            f"Поражений: *{losses}*\n"
-            f"Процент побед: *{win_rate}%*"
+            f"Всего игр: <b>{games}</b>\n"
+            f"Побед: <b>{wins}</b>\n"
+            f"Поражений: <b>{losses}</b>\n"
+            f"Процент побед: <b>{win_rate}%</b>"
         )
 
         keyboard = get_back_keyboard()
         if edit_func:
-            await edit_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await edit_func(text, parse_mode="HTML", reply_markup=keyboard)
         else:
-            await answer_func(text, parse_mode="Markdown", reply_markup=keyboard)
+            await answer_func(text, parse_mode="HTML", reply_markup=keyboard)
 
 @router.message(Command("profile"))
 async def cmd_profile(message: types.Message):
@@ -386,9 +408,9 @@ async def text_profile(message: types.Message):
 async def show_menu(message_or_callback):
     text = "📋 *Главное меню*\n\nВыберите раздел:"
     if isinstance(message_or_callback, types.Message):
-        await message_or_callback.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        await message_or_callback.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
     else:
-        await message_or_callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        await message_or_callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @router.message(Command("menu"))
 async def cmd_menu(message: types.Message):
@@ -413,8 +435,6 @@ async def process_menu_callback(callback: types.CallbackQuery, state: FSMContext
         await show_progress(callback)
     elif action == "study":
         await show_study_list(callback)
-    elif action == "profile":
-        await show_profile(callback)
     else:
         await callback.message.answer("Неизвестный раздел")
 
@@ -431,4 +451,4 @@ async def text_battle(message: types.Message, state: FSMContext):
 async def text_progress(message: types.Message):
     await show_progress(message)
 
-# Обработчик для "📚 Слова дня" уже есть выше
+# Обработчик для "📖 Справочник" находится в reference.py
