@@ -16,6 +16,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📚 Список для изучения"),
             ],
             [
+                KeyboardButton(text="👤 Пригласить на бой"),
                 KeyboardButton(text="❌ Отменить поиск"),
             ]
         ],
