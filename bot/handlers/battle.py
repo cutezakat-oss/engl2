@@ -5,7 +5,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func
 from bot.database import AsyncSessionLocal
 from bot.models import User, Battle, BattleRound, StudyWord
 from bot.services.battle_logic import create_battle, find_waiting_battle, join_battle, create_rounds_for_battle
@@ -177,7 +177,9 @@ async def start_battle_search(message: types.Message, state: FSMContext):
 
             level = get_level_by_elo(user.elo)
 
-            waiting_battle = await find_waiting_battle(session)
+            # Ищем битву с таким же уровнем
+            waiting_battle = await find_waiting_battle(session, level)
+
             if waiting_battle:
                 battle = await join_battle(session, waiting_battle, user.id)
                 await state.update_data(battle_id=battle.id)
@@ -210,14 +212,14 @@ async def start_battle_search(message: types.Message, state: FSMContext):
                     logger.error(f"Ошибка при запуске первого раунда: {e}", exc_info=True)
                     await message.answer(f"❌ Произошла ошибка при запуске битвы. Попробуйте позже.")
             else:
-                logger.info(f"Создаём новую битву для игрока {user.id}")
+                logger.info(f"Создаём новую битву для игрока {user.id} с уровнем {level}")
                 battle = await create_battle(session, user.id, level)
                 await state.update_data(battle_id=battle.id)
                 await state.set_state(BattleStates.waiting_for_opponent)
                 queue_count = await get_queue_count(session)
                 
                 await message.answer(
-                    f"⏳ Ищем соперника... В очереди сейчас {queue_count} человек.\n"
+                    f"⏳ Ищем соперника уровня {level}... В очереди сейчас {queue_count} человек.\n"
                     "Вы можете отменить поиск командой /cancel_battle",
                     reply_markup=get_cancel_keyboard()
                 )
@@ -431,7 +433,7 @@ async def handle_answer(message: types.Message, state: FSMContext):
             logger.error(f"Ошибка в handle_answer: {e}", exc_info=True)
             await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
-# ---------- Завершение битвы с предложением добавить неправильные слова ----------
+# ---------- Завершение битвы ----------
 async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, session, bot):
     battle.status = "finished"
     battle.finished_at = func.now()
@@ -449,7 +451,6 @@ async def finish_battle(message_or_callback, state: FSMContext, battle: Battle, 
         loser_id = battle.player2_id if battle.winner_id == battle.player1_id else battle.player1_id
         await update_elo(session, battle.winner_id, loser_id)
 
-    # Отправляем результаты
     result_text = (
         f"🏁 *Битва завершена!*\n\n"
         f"Игрок1: {battle.player1_score} очков\n"
@@ -526,7 +527,6 @@ async def add_study_all_callback(callback: types.CallbackQuery, state: FSMContex
     user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # Проверяем, что пользователь совпадает с player_id
         user = await session.scalar(select(User).where(User.telegram_id == user_id))
         if not user or user.id != player_id:
             await callback.message.edit_text("❌ Вы не участник этой битвы или пользователь не найден.")
@@ -537,7 +537,6 @@ async def add_study_all_callback(callback: types.CallbackQuery, state: FSMContex
             await callback.message.edit_text("❌ Битва не найдена.")
             return
 
-        # Собираем неправильные слова
         rounds = await session.scalars(
             select(BattleRound).where(BattleRound.battle_id == battle_id)
         )
